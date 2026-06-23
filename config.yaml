@@ -1,0 +1,138 @@
+
+model_list:
+
+  # ---------------------------
+  # CLAUDE MODELS
+  # ---------------------------
+
+  - model_name: claude-3-haiku
+    litellm_params:
+      model: sap/anthropic--claude-3-haiku
+      stream: false
+      extra_headers:
+        AI-Resource-Group: "testus"
+
+  - model_name: claude-4-opus
+    litellm_params:
+      model: sap/anthropic--claude-4-opus
+      stream: false
+      extra_headers:
+        AI-Resource-Group: "testus"
+
+  - model_name: claude-4-sonnet
+    litellm_params:
+      model: sap/anthropic--claude-4-sonnet
+      stream: false
+      extra_headers:
+        AI-Resource-Group: "testus"
+
+  - model_name: claude-4.5-haiku
+    litellm_params:
+      model: sap/anthropic--claude-4.5-haiku
+      stream: false
+      extra_headers:
+        AI-Resource-Group: "testus"
+
+  - model_name: claude-4.5-opus
+    litellm_params:
+      model: sap/anthropic--claude-4.5-opus
+      stream: false
+      extra_headers:
+        AI-Resource-Group: "testus"
+
+  - model_name: claude-4.5-sonnet
+    litellm_params:
+      model: sap/anthropic--claude-4.5-sonnet
+      stream: false
+      extra_headers:
+        AI-Resource-Group: "testus"
+
+  - model_name: claude-4.6-opus
+    litellm_params:
+      model: sap/anthropic--claude-4.6-opus
+      stream: false
+      extra_headers:
+        AI-Resource-Group: "testus"
+
+  - model_name: claude-4.6-sonnet
+    litellm_params:
+      model: sap/anthropic--claude-4.6-sonnet
+      stream: false
+      extra_headers:
+        AI-Resource-Group: "testus"
+
+  - model_name: claude-4.7-opus
+    litellm_params:
+      model: sap/anthropic--claude-4.7-opus
+      stream: false
+      extra_headers:
+        AI-Resource-Group: "testus"
+
+# ---------------------------
+# ROUTER SETTINGS
+# ---------------------------
+
+router_settings:
+  enable_pre_call_checks: false
+
+# ---------------------------
+# GENERAL SETTINGS
+# ---------------------------
+
+general_settings:
+  master_key: "sk-123456"
+
+# ---------------------------
+# MODEL DEFAULTS
+# ---------------------------
+
+model_defaults:
+  stream: false
+
+# ---------------------------
+# LITELLM SETTINGS
+# ---------------------------
+
+litellm_settings:
+
+  drop_params: true
+
+  modify_params: true
+
+  set_verbose: false
+
+  request_timeout: 600
+
+  num_retries: 2
+
+  force_timeout: 600
+
+  json_logs: true
+
+  cache: false
+
+  success_callback: []
+
+  failure_callback: []
+
+  service_callbacks: []
+
+  turn_off_message_logging: false
+
+  callbacks:
+    - hooks.sap_perf_optimizer
+
+environment_variables:
+    LITELLM_MASTER_KEY: "sk-123456"
+    AICORE_RESOURCE_GROUP: "testus"
+    AICORE_SERVICE_KEY: |
+        {
+          "credentials": {
+            "clientid": "sb-b1a5fb13-c20c-403f-9266-3ed37a3f91a1!b541355|aicore!b164",
+            "clientsecret": "2e13b9c9-8d62-42fb-8904-bdbf9f8da13e$DQ_VQiY4NWaj8Pp_0Tm1NR3RHVHV8n4WrSTMTejOAGA=",
+            "url": "https://satinfotech-us.authentication.us10.hana.ondemand.com",
+            "serviceurls": {
+              "AI_API_URL": "https://api.ai.prod.us-east-1.aws.ml.hana.ondemand.com"
+            }
+          }
+        }
