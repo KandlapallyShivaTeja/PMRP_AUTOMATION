@@ -2,3 +2,7 @@
 /__pycache__
 *.log
 .env
+/captured_api_runs
+*.png
+*.xml
+*.md

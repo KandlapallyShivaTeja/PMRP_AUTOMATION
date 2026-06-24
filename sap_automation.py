@@ -38,11 +38,12 @@ def sap_session_handler(func):
         # Direct Create Wizard URL
         target_url = base_url + "/ui#PMRPSimulation-create?%252Fh4screen=SchedPMRPSimuCreat&JobCatalogEntryName=SAP_SCM_PMRP_CREATE_WC%252CSAP_SCM_PMRP_CREATE_MAT%252CSAP_SCM_PMRP_CREATE_MATCOMP&/v4_JobRunCreate"
 
-        print(f"[INFO] Launching browser to connect to target URL: {target_url}", file=sys.stderr)
+        headless = os.getenv("SAP_HEADLESS", "true").lower() == "true"
+        print(f"[INFO] Launching browser (headless={headless}) to connect to target URL: {target_url}", file=sys.stderr)
         
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False, args=["--start-maximized"])
-            context = browser.new_context(no_viewport=True)
+            browser = p.chromium.launch(headless=headless, args=[] if headless else ["--start-maximized"])
+            context = browser.new_context() if headless else browser.new_context(no_viewport=True)
             page = context.new_page()
             page.on("console", lambda msg: print(f"[BROWSER] {msg.type}: {msg.text}", file=sys.stderr) if msg.type == "error" else None)
             try:
@@ -400,255 +401,315 @@ def run_automation(page, sap_url, fields, filter_labels=None):
             sorted_fields[key] = val
     fields = sorted_fields
 
-    # Wait for Create button (already navigated by decorator)
-    # Wait for either Create button OR Step 1 field (Job Template)
-    print("[INFO] Waiting for page entry (Create button or Job Template field)...", file=sys.stderr)
-    create_btn = page.locator("#application-PMRPSimulation-create-component---JobRunList--appJobsOverviewAddJobButton-BDI-content").first
-    step1_label = page.locator("#application-PMRPSimulation-create-component---JobRunCreate--appJobsCreateLabelTemplateName, label:has-text('Job Template')").first
-    
-    try:
-        page.locator("#application-PMRPSimulation-create-component---JobRunList--appJobsOverviewAddJobButton-BDI-content, #application-PMRPSimulation-create-component---JobRunCreate--appJobsCreateLabelTemplateName, label:has-text('Job Template')").first.wait_for(state="visible", timeout=45000)
-    except Exception:
-        raise Exception("Failed to load page: neither the 'Create' button nor the 'Job Template' field appeared.")
-        
-    if create_btn.count() > 0 and create_btn.is_visible():
-        print("[INFO] List page loaded. Clicking Create button...", file=sys.stderr)
-        page.wait_for_timeout(1000)
-        create_btn.click()
-        
-    # Wait for Step 1 fields to be visible
-    print("[INFO] Waiting for Step 1 fields...", file=sys.stderr)
-    try:
-        step1_label.wait_for(state="visible", timeout=15000)
-    except Exception:
-        if create_btn.count() > 0 and create_btn.is_visible():
-            print("[WARNING] Step 1 did not load. Retrying click on Create button...", file=sys.stderr)
-            create_btn.click()
-            step1_label.wait_for(state="visible", timeout=15000)
-        else:
-            raise
-        
-    print("[INFO] Step 1 fields are visible.", file=sys.stderr)
+    # Normalize and map date inputs and dropdown keys to SAP OData format
+    ref_id = sorted_fields.get("ID for Reference Data", "")
+    ref_desc = sorted_fields.get("Reference Description", "")
+    bucket_cat_input = sorted_fields.get("Bucket Category", "Month")
+    start_date_input = sorted_fields.get("Start Date of Reference", "")
+    end_date_input = sorted_fields.get("End Date of Reference", "")
+    sim_id = sorted_fields.get("Simulation ID", "")
+    sim_desc = sorted_fields.get("Simulation Description", "")
+    bom_use_input = sorted_fields.get("BOM Usage", "1")
+    task_list_input = sorted_fields.get("Task List Usage", "Production")
+    plant = sorted_fields.get("Plant", "")
+    material = sorted_fields.get("Material", "")
 
-    # Click Step 2
-    print("[INFO] Clicking Step 2 button...")
-    step2_btn = page.locator("button:has-text('Step 2'), button[id*='SelectTemplateStep-nextButton'], #application-PMRPSimulation-create-component---JobRunCreate--SelectTemplateStep-nextButton-BDI-content").first
-    step2_btn.wait_for(state="visible", timeout=15000)
+    # Mappings
+    bucket_cat = "M" if "week" not in bucket_cat_input.lower() else "W"
     
-    # Click Step 2 with retry loop until Step 2 field is visible
-    step2_field = page.locator("label[title='Start Immediately']:visible, label:has-text('Start Immediately'):visible, #application-PMRPSimulation-create-component---JobRunCreate--immediateCheckbox:visible").first
-    for attempt in range(5):
-        try:
-            step2_btn.click()
-            step2_field.wait_for(state="visible", timeout=4000)
-            break
-        except Exception:
-            print(f"[WARNING] Step 2 transition did not occur. Retrying click (Attempt {attempt+1})...")
-            page.wait_for_timeout(1000)
-    else:
-        raise Exception("Failed to transition to Step 2 after multiple clicks.")
-    print("[INFO] Step 2 fields are visible.")
+    def convert_date(d_str):
+        if not d_str:
+            return ""
+        if "." in d_str:
+            parts = d_str.split(".")
+            if len(parts) == 3:
+                return f"{parts[2]}{parts[1]}{parts[0]}"
+        elif "-" in d_str:
+            parts = d_str.split("-")
+            if len(parts) == 3:
+                return f"{parts[0]}{parts[1]}{parts[2]}"
+        return d_str
 
-    # Click Step 3
-    print("[INFO] Clicking Step 3 button...")
-    step3_btn = page.locator("button:has-text('Step 3'), button[id*='CreateSchedulingOptionsStep-nextButton'], #application-PMRPSimulation-create-component---JobRunCreate--CreateSchedulingOptionsStep-nextButton-BDI-content").first
-    step3_btn.wait_for(state="visible", timeout=15000)
+    start_date = convert_date(start_date_input)
+    end_date = convert_date(end_date_input)
+
+    bom_use = "1" if "production" in bom_use_input.lower() or bom_use_input == "1" else bom_use_input
+    task_list = "1" if "production" in task_list_input.lower() or task_list_input == "1" else task_list_input
+
+    # Construct the JSON select-options parameters
+    # Dynamically build job_params to support comma‑separated multi‑value fields
+    def split_vals(val):
+        # Split on commas and trim whitespace
+        return [p.strip() for p in str(val).split(",") if p.strip()]
+
+    job_params = {"VALUES": []}
+
+    # Helper to add a parameter entry
+    def add_param(name, raw):
+        parts = split_vals(raw)
+        t_vals = [{"SIGN": "I", "OPTION": "EQ", "LOW": p, "HIGH": ""} for p in parts]
+        job_params["VALUES"].append({"NAME": name, "T_VALUE": t_vals})
+
+    # Populate parameters
+    add_param("P_REFID", ref_id)
+    add_param("P_REFD", ref_desc)
+    # Bucket category expects M or W – convert if needed
+    bucket_val = "M" if "week" not in bucket_cat.lower() else "W"
+    add_param("P_BUCK", bucket_val)
+    add_param("P_START", start_date)
+    add_param("P_END", end_date)
+    add_param("P_SIMID", sim_id)
+    add_param("P_SIMD", sim_desc)
+    add_param("SO_WERKS", plant)
+    add_param("SO_MATNR", material)
+    add_param("SO_STLAN", bom_use)
+    add_param("SO_PLANV", task_list)
+
+    # Constant / empty parameters required by the template
+    job_params["VALUES"].append({"NAME": "P_DEL", "T_VALUE": [{"SIGN": "I", "OPTION": "EQ", "LOW": "", "HIGH": ""}]})
+    job_params["VALUES"].append({"NAME": "SO_MMSTA", "T_VALUE": []})
+    job_params["VALUES"].append({"NAME": "SO_MSTAE", "T_VALUE": []})
+    job_params["VALUES"].append({"NAME": "P_TOLER", "T_VALUE": [{"SIGN": "I", "OPTION": "EQ", "LOW": 2, "HIGH": ""}]})
+
+    print("[INFO] Executing API check directly in browser context...", file=sys.stderr)
+    import json
     
-    # Click Step 3 with retry loop until Step 3 section is visible
-    step3_section = page.locator("label:has-text('ID for Reference Data'):visible, label:has-text('Simulation ID'):visible, label:has-text('Plant'):visible").first
-    for attempt in range(5):
-        try:
-            step3_btn.click()
-            step3_section.wait_for(state="visible", timeout=4000)
-            break
-        except Exception:
-            print(f"[WARNING] Step 3 transition did not occur. Retrying click (Attempt {attempt+1})...")
-            page.wait_for_timeout(1000)
-    else:
-        raise Exception("Failed to transition to Step 3 after multiple clicks.")
-    print("[INFO] Step 3 Parameters page loaded. Settling...")
-    page.wait_for_timeout(1000) # Settle delay to let event listeners bind
-
-    # Dynamically fill all supplied fields!
-    for label_text, value in fields.items():
-        print(f"[INFO] Processing field '{label_text}' with value '{value}'...")
+    js_code = f"""
+    (async () => {{
+        const jobParamsStr = '{json.dumps(job_params)}';
+        const encodedParams = encodeURIComponent(jobParamsStr);
         
-        # Locate the field's label
-        label = page.locator("label").filter(has_text=re.compile(rf"^\s*\*?\s*{label_text}\s*\*?:?\s*$", re.IGNORECASE)).first
+        // 1. Fetch CSRF token
+        const metadataRes = await fetch("/sap/opu/odata/sap/APJ_JOB_MANAGEMENT_SRV/$metadata?sap-client=100", {{
+            headers: {{ "x-csrf-token": "fetch" }}
+        }});
+        const csrfToken = metadataRes.headers.get("x-csrf-token");
+        const metadataXml = await metadataRes.clone().text();
+        if (!csrfToken) {{
+            return {{ success: false, error: "Failed to fetch CSRF token" }};
+        }}
+        
+        // 2. Fetch Job Template details to get ETag
+        const templateRes = await fetch("/sap/opu/odata/sap/APJ_JOB_MANAGEMENT_SRV/JobTemplateSet?sap-client=100&$filter=JobTemplateName eq 'SAP_SCM_PMRP_CREATE_C_DEFAULT'", {{
+            headers: {{
+                "Accept": "application/json",
+                "x-csrf-token": csrfToken
+            }}
+        }});
+        const templateData = await templateRes.json();
+        if (!templateData.d || !templateData.d.results || templateData.d.results.length === 0) {{
+            return {{ success: false, error: "Failed to fetch Job Template data" }};
+        }}
+        console.error("METADATA_PARAMS:" + templateData.d.results[0].JobParameterValues);
+        const etag = templateData.d.results[0].__metadata.etag;
+        
+        // 3. Prepare Validation multipart request
+        const valBoundary = "batch_val_check";
+        const valChangeset = "changeset_val_check";
+        const valBody = [
+            `--${{valBoundary}}`,
+            `Content-Type: multipart/mixed; boundary=${{valChangeset}}`,
+            "",
+            `--${{valChangeset}}`,
+            "Content-Type: application/http",
+            "Content-Transfer-Encoding: binary",
+            "",
+            `POST CheckScheduleJob?sap-client=100&CheckPhase='CANDA'&JobParameterValues='${{encodedParams}}'&JobTemplateName='SAP_SCM_PMRP_CREATE_C_DEFAULT'&ParameterKey='' HTTP/1.1`,
+            "sap-cancel-on-close: false",
+            "sap-contextid-accept: header",
+            "Accept: application/json",
+            "Accept-Language: en-US",
+            "DataServiceVersion: 2.0",
+            "MaxDataServiceVersion: 2.0",
+            "X-Requested-With: XMLHttpRequest",
+            `x-csrf-token: ${{csrfToken}}`,
+            "Content-Type: application/json",
+            "Content-ID: id-1",
+            "",
+            "",
+            `--${{valChangeset}}--`,
+            `--${{valBoundary}}--`,
+            ""
+        ].join("\\r\\n");
+
+        const valRes = await fetch("/sap/opu/odata/sap/APJ_JOB_MANAGEMENT_SRV/$batch?sap-client=100", {{
+            method: "POST",
+            headers: {{
+                "Content-Type": `multipart/mixed; boundary=${{valBoundary}}`,
+                "x-csrf-token": csrfToken,
+                "Accept": "application/json"
+            }},
+            body: valBody
+        }});
+        const valText = await valRes.text();
+
+        // 4. Check validation success
+        const valSuccessful = !valText.includes('"SuccessfulInd":false');
+        if (!valSuccessful) {{
+            return {{ success: false, validationFailed: true, valResponse: valText, schedResponse: "", metadataXml: metadataXml }};
+        }}
+
+        // 5. If validation passes, construct and execute ScheduleJob PUT batch call
+        const schedBoundary = "batch_sched_run";
+        const schedChangeset = "changeset_sched_run";
+        const now = new Date();
+        const timestampStr = now.toISOString().replace("Z", "");
+        
+        const schedBody = [
+            `--${{schedBoundary}}`,
+            `Content-Type: multipart/mixed; boundary=${{schedChangeset}}`,
+            "",
+            `--${{schedChangeset}}`,
+            "Content-Type: application/http",
+            "Content-Transfer-Encoding: binary",
+            "",
+            `PUT ScheduleJob?sap-client=100&CalendarId='01'&EndDateTime=datetime'1970-01-01T00%3A00%3A00'&EndMaxIterations=10&EndTypeC=''&JobCatalogEntryName='SAP_SCM_PMRP_CREATE_MATCOMP'&JobTemplateName='SAP_SCM_PMRP_CREATE_C_DEFAULT'&JobText='Creation%20of%20pMRP%20Data%20via%20Components'&PeriodicGranularity=''&PeriodicValue=0&ScheduleTypeCode='I'&StartDateTime=datetime'${{timestampStr}}'&StartRestrictionCode=''&MonthOnlyWorkdaysInd=false&MonthDay=0&WeekDayInfo=''&MonthDayShiftDirection='0'&SchedulingTimezone='INDIA'&WeekNumber=0&SkipCheckAndAdjustInd=true&JobParameterValues='${{encodedParams}}' HTTP/1.1`,
+            "sap-cancel-on-close: false",
+            "sap-contextid-accept: header",
+            "Accept: application/json",
+            "Accept-Language: en-US",
+            "DataServiceVersion: 2.0",
+            "MaxDataServiceVersion: 2.0",
+            "X-Requested-With: XMLHttpRequest",
+            `x-csrf-token: ${{csrfToken}}`,
+            `If-Match: ${{etag}}`,
+            "Content-Type: application/json",
+            "Content-ID: id-1",
+            "",
+            "",
+            `--${{schedChangeset}}--`,
+            `--${{schedBoundary}}--`,
+            ""
+        ].join("\\r\\n");
+
+        const schedRes = await fetch("/sap/opu/odata/sap/APJ_JOB_MANAGEMENT_SRV/$batch?sap-client=100", {{
+            method: "POST",
+            headers: {{
+                "Content-Type": `multipart/mixed; boundary=${{schedBoundary}}`,
+                "x-csrf-token": csrfToken,
+                "Accept": "application/json"
+            }},
+            body: schedBody
+        }});
+        const schedText = await schedRes.text();
+        
+        const schedSuccessful = !schedText.includes('"SuccessfulInd":false') && !schedText.includes('"severity":"error"');
+        
+        return {{ 
+            success: schedSuccessful, 
+            validationFailed: false,
+            valResponse: valText,
+            schedResponse: schedText,
+            metadataXml: metadataXml
+        }};
+    }})()
+    """
+    
+    result = page.evaluate(js_code)
+    
+    metadata_xml = result.get("metadataXml", "")
+    if metadata_xml:
         try:
-            label.wait_for(state="visible", timeout=5000)
-        except Exception:
-            print(f"[WARNING] Label '{label_text}' not found on Step 3 page. Skipping...")
-            continue
+            with open("sap_metadata.xml", "w", encoding="utf-8") as f:
+                f.write(metadata_xml)
+            print("[INFO] Saved OData metadata to sap_metadata.xml", file=sys.stderr)
+        except Exception as e:
+            print(f"[WARNING] Failed to save metadata: {e}", file=sys.stderr)
+
+    is_success = result.get("success", False)
+    val_resp = result.get("valResponse", "")
+    sched_resp = result.get("schedResponse", "")
+    
+    if not is_success:
+        # Handle Validation or Scheduling Failure
+        error_details = []
+        resp_text = sched_resp if sched_resp else val_resp
+        
+        # Match sap-message header JSON
+        sap_msg_str = ""
+        msg_match = re.search(r'sap-message:\s*({.*?})(?:\r?\n|$)', resp_text)
+        if msg_match:
+            sap_msg_str = msg_match.group(1)
             
-        # Determine if it has an F4 help icon associated with it
-        for_id = label.get_attribute("for")
-        has_f4 = False
-        if for_id:
-            control_id = for_id.replace("-inner", "")
-            # Check if there is an F4 help icon inside the container or matching ID
-            vhi = page.locator(f"#{control_id}-vhi, #{control_id} .sapMInputValHelpIcon").first
-            if vhi.count() > 0 and vhi.is_visible():
-                has_f4 = True
-        if not has_f4:
-            # Locate the input sibling and check its container specifically (never search whole form row)
+        if sap_msg_str:
             try:
-                if for_id:
-                    inp = page.locator(f"#{for_id}")
-                else:
-                    inp = label.locator("xpath=../..").locator("input").first
-                
-                vhi = inp.locator("xpath=..").locator(".sapMInputValHelpIcon").first
-                if vhi.count() > 0 and vhi.is_visible():
-                    has_f4 = True
+                import json
+                msg_data = json.loads(sap_msg_str)
+                if msg_data.get("message"):
+                    error_details.append(f"- **Error:** {msg_data.get('message')}")
+                for detail in msg_data.get("details", []):
+                    if detail.get("message"):
+                        error_details.append(f"- **Detail:** {detail.get('message')}")
             except Exception:
-                pass
-                
-        # Double-layer safety: explicitly exclude fields known to be direct input/selects
-        direct_only_fields = [
-            "id for reference data", "reference description",
-            "start date of reference", "end date of reference",
-            "simulation id", "simulation description"
-        ]
-        if label_text.lower() in direct_only_fields:
-            has_f4 = False
-                
-        if has_f4:
-            print(f"[INFO] Field '{label_text}' identified as F4 Help input.")
-            # Clear existing tokens first if any exist
-            clear_existing_tokens(page, label_text)
-            
-            # Fetch filter label if provided
-            filter_label = filter_labels.get(label_text)
-            
-            # Execute F4 select
-            handle_f4_select(page, label_text, value, filter_label=filter_label)
+                error_details.append(f"- **Message:** {sap_msg_str}")
         else:
-            print(f"[INFO] Field '{label_text}' identified as direct input field.")
-            fill_direct_field(page, label_text, value)
+            error_details.append("- **Message:** Validation check failed, but no specific message was returned.")
             
-        page.wait_for_timeout(500) # Settle after filling
-
-    # Save screenshot of filled form
-    print("[INFO] Dynamic parameters entered. Saving verification screenshot...")
-    page.screenshot(path="sap_parameters_filled.png")
-
-    # Step 4: Verification Check
-    print("[INFO] Clicking 'Check' button...")
-    check_btn = page.locator("#application-PMRPSimulation-create-component---JobRunCreate--checkButton-BDI-content, button[id*='checkButton']").first
-    check_btn.click()
-    page.wait_for_timeout(3000) # Give check result time to compute
-
-    # Open/Inspect Message Popover in footer (bottom-left)
-    print("[INFO] Checking if Message Popover is visible...")
-    popover = page.locator(".sapMPopover:visible, .sapMMessagePopover:visible, .sapMMessageView:visible, div[id*='messagePopover']:visible").first
-    
-    # Check if the popover is visible automatically
-    popover_visible = False
-    try:
-        popover.wait_for(state="visible", timeout=4000)
-        popover_visible = True
-        print("[INFO] Message Popover is already open.")
-    except Exception:
-        pass
-    
-    if not popover_visible:
-        # Find the footer message button
-        msg_popover_btn = page.locator(
-            "button[id*='JobRunCreate--messageButton']:visible, "
-            "button[id*='messageButton']:visible, "
-            ".sapMMessagePopoverBtn:visible, "
-            ".sapUiMessagePopoverBtn:visible"
-        ).first
+        error_summary = "\n".join(error_details)
+        print(f"[WARNING] SAP Action Failed:\n{error_summary}", file=sys.stderr)
         
-        if msg_popover_btn.count() > 0:
-            is_enabled = msg_popover_btn.is_enabled()
-            print(f"[INFO] Message button enabled state: {is_enabled}")
-            if is_enabled:
-                print("[INFO] Clicking message button to open popover...")
-                msg_popover_btn.click()
-                popover.wait_for(state="visible", timeout=5000)
-                popover_visible = True
-            else:
-                print("[INFO] Message button is disabled. No validation errors returned.")
-        else:
-            print("[INFO] Message button not found in footer.")
-
-    is_success = True
-    popover_text = ""
-    if popover_visible:
-        # Cleanly extract list items or titles inside the message view to avoid interface noise
-        items = popover.locator(".sapMMessageViewItem, .sapMMessageListItem, .sapMMsgViewItemTitle, .sapMMessagePopoverContent, .sapMMessagePopoverItem").all()
-        if items:
-            messages = []
-            for item in items:
-                txt = item.text_content()
-                if txt and txt.strip():
-                    cleaned = " ".join(txt.split())
-                    # Deduplicate and filter out utility words
-                    if cleaned not in messages:
-                        messages.append(cleaned)
-            popover_text = " | ".join(messages)
-        else:
-            popover_text = " ".join((popover.text_content() or "").split())
+        # Take verification failure screenshot
+        try:
+            page.screenshot(path="job_check_failed.png")
+        except Exception:
+            pass
             
-        print(f"[INFO] Scraped SAP Popover Messages: '{popover_text}'")
-        
-        success_msg = "You can go ahead and schedule the job."
-        is_success = success_msg in popover_text
-
-    if is_success:
-        print("[SUCCESS] Validation succeeded. Clicking 'Schedule' button...")
-        schedule_btn = page.locator("#application-PMRPSimulation-create-component---JobRunCreate--scheduleButton-BDI-content, button[id*='scheduleButton'], button:has-text('Schedule')").first
-        schedule_btn.click()
-        print(f"[INFO] Clicked Schedule button. Waiting 2 seconds to capture success state...")
-        page.wait_for_timeout(2000)
-        page.screenshot(path="job_scheduled_success.png")
-
-        # Navigate to the pMRP Simulation URL
-        sim_url = "https://my401292.s4hana.cloud.sap/ui#PMRPSimulation-simulate&/?sap-iapp-state=AS99TB9M6NIPS212WLIDXZAZFMU5EJOUSCH0YFU4&sap-iapp-state--history=TAS52YK80GBQW9L57V0V096OXAXDS5RO3QH89PFSA"
-        print(f"[INFO] Navigating directly to pMRP Simulation URL: {sim_url}")
-        page.goto(sim_url, wait_until="load", timeout=0)
-        
-        print("[INFO] Waiting exactly 10 seconds on the pMRP Simulation dashboard...")
-        page.wait_for_timeout(10000)
-            
-        page.screenshot(path="job_simulated_dashboard.png")
-        print("[SUCCESS] Navigated to pMRP Simulation dashboard successfully.")
-        return f"""# 📋 SAP pMRP Automation Report
-
-### ✅ Execution Succeeded
-The pMRP simulation job has been successfully created, checked, and scheduled in SAP.
-
-### 🔍 Execution Details:
-* **SAP Message / Popover:** `{popover_text.strip()}`
-* **Action Performed:** Parameters were entered, validation passed, and the job was scheduled.
-* **Redirection URL:** Navigated to pMRP Simulation Dashboard successfully."""
-    else:
-        cleaned_msg = popover_text.replace("MessagesCloseMessages", "").replace("Errors, please check job parameters", "").strip()
-        cleaned_msg = re.sub(r'\s*\|\s*\|+', ' |', cleaned_msg).strip(" |")
-        print(f"[WARNING] SAP Validation Failed: {cleaned_msg}")
-        page.screenshot(path="job_check_failed.png")
         return f"""# 📋 SAP pMRP Automation Report
 
 ### ⚠️ SAP Validation Failed
-The parameters were filled, but SAP returned validation errors during the check phase.
+The parameters were validated, but SAP returned validation errors.
 
 ### 🔍 Validation Details:
-* **SAP Message / Popover:** `{cleaned_msg}`
+{error_summary}
 
 > [!WARNING]
-> The job was not scheduled. A screenshot of the validation failure was saved as `job_check_failed.png`."""
+> The job was not scheduled. Please adjust your parameters and try again."""
+
+    # Success Flow
+    print("[SUCCESS] Job created and scheduled successfully. Capturing confirmation screenshots...", file=sys.stderr)
+    
+    # 1. Take screenshot of the Application Jobs list showing the scheduled job
+    base_url = sap_url.rstrip('/')
+    list_url = base_url + "/ui#PMRPSimulation-create"
+    print(f"[INFO] Navigating to Application Jobs List: {list_url}", file=sys.stderr)
+    page.goto(list_url, wait_until="load", timeout=0)
+    page.wait_for_timeout(3000) # Let the table/log records load
+    page.screenshot(path="job_scheduled_success.png")
+    
+    # 2. Take screenshot of the pMRP Simulation Dashboard
+    sim_url = "https://my401292.s4hana.cloud.sap/ui#PMRPSimulation-simulate&/?sap-iapp-state=AS99TB9M6NIPS212WLIDXZAZFMU5EJOUSCH0YFU4&sap-iapp-state--history=TAS52YK80GBQW9L57V0V096OXAXDS5RO3QH89PFSA"
+    print(f"[INFO] Navigating directly to pMRP Simulation URL: {sim_url}", file=sys.stderr)
+    page.goto(sim_url, wait_until="load", timeout=0)
+    print("[INFO] Waiting exactly 10 seconds on the pMRP Simulation dashboard...", file=sys.stderr)
+    page.wait_for_timeout(10000)
+    page.screenshot(path="job_simulated_dashboard.png")
+    print("[SUCCESS] Navigated to pMRP Simulation dashboard successfully.", file=sys.stderr)
+    
+    details_lines = []
+    for field_name, field_val in fields.items():
+        details_lines.append(f"* **{field_name}:** `{field_val}`")
+    details_summary = "\n".join(details_lines)
+
+    return f"""# 📋 SAP pMRP Automation Report
+
+### ✅ Execution Succeeded
+The pMRP simulation job has been successfully created, validated, and scheduled in SAP.
+
+### 🔍 Execution Details:
+{details_summary}
+* **Redirection URL:** Navigated to pMRP Simulation Dashboard successfully."""
 
 if __name__ == "__main__":
+    import datetime
+    suffix = datetime.datetime.now().strftime("%m%d%H%M%S")
     test_fields = {
-        "ID for Reference Data": "REF_JUNE",
-        "Reference Description": "REFERENCE JUNE",
+        "ID for Reference Data": f"REF_{suffix}",
+        "Reference Description": f"REFERENCE {suffix}",
         "Bucket Category": "Month",
         "Start Date of Reference": "01.07.2026",
         "End Date of Reference": "01.10.2026",
-        "Simulation ID": "SIM_JUNE09",
-        "Simulation Description": "PLANNING TEST",
+        "Simulation ID": f"SIM_{suffix}",
+        "Simulation Description": f"PLANNING TEST {suffix}",
         "BOM Usage": "1",
         "Task List Usage": "Production",
         "Plant": "1001",
