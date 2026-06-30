@@ -6,3 +6,14 @@
 *.png
 *.xml
 *.md
+*.html
+scratch_*.py
+*.json
+extracted_*.py
+log_*.py
+log_*.txt
+sap_*.txt
+original_*.py
+commit_*.py
+capture_*.py
+check_*.py

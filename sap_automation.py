@@ -1,10 +1,9 @@
 import os
 import re
+import sys
 import time
 from dotenv import load_dotenv
-from playwright.sync_api import sync_playwright
-
-import sys
+from playwright.sync_api import sync_playwright, Page, BrowserContext
 
 # Redefine print globally within this module to write to sys.stderr by default
 # This prevents stdout pollution which corrupts the FastMCP JSON-RPC communication channel
@@ -16,10 +15,10 @@ def print(*args, **kwargs):
 def smart_logout(page, base_url):
     """URL-based SAP session termination."""
     try:
-        print("[INFO] 👋 Signing out...", file=sys.stderr)
+        print("[INFO] Signing out...", file=sys.stderr)
         base_url = base_url.rstrip('/')
         page.goto(f"{base_url}/sap/public/bc/icf/logoff?sap-client=100", timeout=10000)
-        print("[INFO] ✅ Session closed.", file=sys.stderr)
+        print("[INFO] Session closed.", file=sys.stderr)
     except Exception as e:
         print(f"[WARNING] Logout failed: {e}", file=sys.stderr)
 
@@ -35,7 +34,6 @@ def sap_session_handler(func):
             raise Exception("Missing credentials in .env file.")
 
         base_url = sap_url.rstrip('/')
-        # Direct Create Wizard URL
         target_url = base_url + "/ui#PMRPSimulation-create?%252Fh4screen=SchedPMRPSimuCreat&JobCatalogEntryName=SAP_SCM_PMRP_CREATE_WC%252CSAP_SCM_PMRP_CREATE_MAT%252CSAP_SCM_PMRP_CREATE_MATCOMP&/v4_JobRunCreate"
 
         headless = os.getenv("SAP_HEADLESS", "true").lower() == "true"
@@ -50,13 +48,11 @@ def sap_session_handler(func):
                 print(f"[INFO] Navigating directly to application page...", file=sys.stderr)
                 page.goto(target_url, wait_until="load", timeout=0)
                 
-                # Wait until either the login username input OR the application Create/Wizard elements are visible
                 print("[INFO] Waiting for page determination...", file=sys.stderr)
                 login_selector = page.locator("#j_username")
                 app_selector = page.locator("#application-PMRPSimulation-create-component---JobRunList--appJobsOverviewAddJobButton-BDI-content, label:has-text('Job Template')").first
                 
                 try:
-                    # Comma-separated selector waits for either to match
                     page.locator("#j_username, #application-PMRPSimulation-create-component---JobRunList--appJobsOverviewAddJobButton-BDI-content, label:has-text('Job Template')").first.wait_for(state="visible", timeout=60000)
                 except Exception:
                     raise Exception("Target page failed to load (neither login screen nor SAP application elements appeared within 60 seconds).")
@@ -74,7 +70,6 @@ def sap_session_handler(func):
                 else:
                     raise Exception("Neither login field nor SAP application elements are visible on the page.")
                 
-                # Execute the wrapped function logic
                 return func(page, sap_url, *args, **kwargs)
             except Exception as e:
                 print(f"[ERROR] Automation failed: {e}", file=sys.stderr)
@@ -83,18 +78,17 @@ def sap_session_handler(func):
                     print("[INFO] Saved failure screenshot as 'automation_error.png'", file=sys.stderr)
                 except Exception as se:
                     print(f"[ERROR] Could not save screenshot: {se}", file=sys.stderr)
-                return f"""# 📋 SAP pMRP Automation Report
+                return f"""# SAP pMRP Automation Report
 
-### ❌ Automation Error Encountered
+### Automation Error Encountered
 An error occurred during the execution of the browser automation script.
 
-### 🔍 Error Details:
+### Error Details:
 * **Error Message:** `{e}`
 
 > [!IMPORTANT]
 > The automation was stopped. A failure screenshot has been saved to the host directory as `automation_error.png` for diagnostic purposes."""
             finally:
-                # Perform smart logout before closing browser
                 smart_logout(page, sap_url)
                 context.close()
                 browser.close()
@@ -133,7 +127,6 @@ def get_field_elements(page, label_text):
         if vhi.count() > 0:
             return inp, vhi
             
-    # Sibling fallback: find the first input element following the label in document order
     inp = label.locator("xpath=following::input[1]")
     inp_id = inp.get_attribute("id")
     if inp_id:
@@ -159,20 +152,14 @@ def fill_direct_field(page, label_text, value):
     page.wait_for_timeout(100)
 
 def handle_f4_select(page, label_text, search_value, filter_label=None):
-    """Clicks F4 help button, searches for value, selects it, and closes dialog.
-       Auto-detects checkbox (in standard & parallel tables) and OK button presence.
-       If filter_label is provided, searches in that specific filter field inside the dialog."""
+    """Clicks F4 help button, searches for value, selects it, and closes dialog."""
     print(f"[INFO] Using F4 Help for '{label_text}' -> typing search query '{search_value}'...")
     
-    # Locate the value help icon (VHI) using unified helper
     _, vhi = get_field_elements(page, label_text)
-    
     vhi.wait_for(state="visible", timeout=15000)
     
-    # Wait for the Dialog to appear
     dialog = page.locator("div.sapMDialog:visible").first
     
-    # Click VHI with retry logic in case event listener is not yet bound
     for attempt in range(4):
         try:
             vhi.click()
@@ -184,7 +171,6 @@ def handle_f4_select(page, label_text, search_value, filter_label=None):
     else:
         raise Exception(f"Failed to open F4 dialog for '{label_text}'")
     
-    # Try finding the specific input if filter_label is specified
     has_search = True
     search_input = None
     
@@ -203,7 +189,6 @@ def handle_f4_select(page, label_text, search_value, filter_label=None):
             filter_label = None
 
     if not filter_label or search_input is None:
-        # Target only the Search Field input to prevent opening any select-view dropdowns
         search_input = dialog.locator(".sapMSF input, input[type='search'].sapMSFI").first
         try:
             search_input.wait_for(state="visible", timeout=2000)
@@ -216,7 +201,6 @@ def handle_f4_select(page, label_text, search_value, filter_label=None):
                 print("[INFO] No search input found in F4 dialog. Proceeding to select directly from list...")
         
     if has_search and search_input is not None:
-        # Close any warning message popovers that could steal focus
         msg_close = page.locator(".sapMPopover:visible button[id*='close'], button.sapMPopoverCloseButton:visible, button[id*='messagePopover-close']:visible").first
         if msg_close.count() > 0 and msg_close.is_visible():
             try:
@@ -232,7 +216,6 @@ def handle_f4_select(page, label_text, search_value, filter_label=None):
         page.wait_for_timeout(100)
         search_input.press("Enter")
         
-        # Click search / Go button
         go_btn = dialog.locator(
             "button[id*='search']:visible, "
             "button[id*='go']:visible, "
@@ -247,22 +230,15 @@ def handle_f4_select(page, label_text, search_value, filter_label=None):
             except Exception:
                 pass
         
-        # Wait for search results to begin updating
         page.wait_for_timeout(300)
     
-    # Locate matching cell in the results table body (using role="gridcell" to avoid headers)
     cell_selector = "[role='gridcell'], .sapMListTblCell"
     cell = dialog.locator(cell_selector).filter(has_text=search_value).first
-    
-    # Wait for the exact matching cell to load and become visible
     cell.wait_for(state="visible", timeout=15000)
         
-    # Check if a checkbox exists for selection
-    # 1. Try finding checkbox in the same row (for sap.m.Table)
     row = cell.locator("xpath=ancestor::tr[1] | ancestor::li[1]")
     checkbox = row.locator("div.sapMCb, [role='checkbox']").first
     
-    # 2. Try parallel table selector mapping using DOM row index (for sap.ui.table.Table)
     if not (checkbox.count() > 0 and checkbox.is_visible()):
         try:
             row_index = row.evaluate("""el => {
@@ -278,7 +254,6 @@ def handle_f4_select(page, label_text, search_value, filter_label=None):
         except Exception as re_err:
             print(f"[WARNING] Failed to calculate parallel row index: {re_err}")
 
-    # Click the checkbox if found, otherwise click cell directly
     if checkbox.count() > 0 and checkbox.is_visible():
         print(f"[INFO] Clicking selection checkbox for '{label_text}'...")
         checkbox.click()
@@ -286,15 +261,13 @@ def handle_f4_select(page, label_text, search_value, filter_label=None):
         print(f"[INFO] Clicking cell directly for '{label_text}'...")
         cell.click()
         
-    page.wait_for_timeout(500) # Give state a moment to sync
+    page.wait_for_timeout(500)
 
-    # Check if an OK button exists at the bottom of the dialog and click it
     ok_btn = dialog.locator("button:has-text('OK')").first
     if ok_btn.count() > 0 and ok_btn.is_visible():
         ok_btn.click()
         
     print(f"[SUCCESS] Handled F4 selection for '{label_text}'.")
-    # Wait for dialog to close
     dialog.wait_for(state="hidden", timeout=10000)
 
 LABEL_MAP = {
@@ -351,7 +324,6 @@ def run_automation(page, sap_url, fields, filter_labels=None):
     if filter_labels is None:
         filter_labels = {}
 
-    # Normalize filter_labels (map camelCase/short names to exact SAP labels)
     normalized_filters = {}
     for k, v in filter_labels.items():
         norm_key = str(k).lower().replace("_", "").replace(" ", "")
@@ -359,17 +331,14 @@ def run_automation(page, sap_url, fields, filter_labels=None):
         normalized_filters[mapped_key] = str(v)
     filter_labels = normalized_filters
 
-    # Default filters if not provided
     if "Task List Usage" not in filter_labels:
         filter_labels["Task List Usage"] = "Description"
 
-    # Normalize fields (map camelCase/short names to exact SAP labels, and auto-convert YYYY-MM-DD dates)
     normalized_fields = {}
     for k, v in fields.items():
         norm_key = str(k).lower().replace("_", "").replace(" ", "")
         mapped_key = LABEL_MAP.get(norm_key, k)
         
-        # Auto-convert dates from YYYY-MM-DD to DD.MM.YYYY
         if isinstance(v, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", v):
             try:
                 parts = v.split("-")
@@ -378,7 +347,6 @@ def run_automation(page, sap_url, fields, filter_labels=None):
                 pass
         normalized_fields[mapped_key] = str(v)
 
-    # Sort fields strictly to match the exact top-to-bottom UI sequence
     ordered_keys = [
         "ID for Reference Data",
         "Reference Description",
@@ -401,7 +369,6 @@ def run_automation(page, sap_url, fields, filter_labels=None):
             sorted_fields[key] = val
     fields = sorted_fields
 
-    # Normalize and map date inputs and dropdown keys to SAP OData format
     ref_id = sorted_fields.get("ID for Reference Data", "")
     ref_desc = sorted_fields.get("Reference Description", "")
     bucket_cat_input = sorted_fields.get("Bucket Category", "Month")
@@ -413,8 +380,8 @@ def run_automation(page, sap_url, fields, filter_labels=None):
     task_list_input = sorted_fields.get("Task List Usage", "Production")
     plant = sorted_fields.get("Plant", "")
     material = sorted_fields.get("Material", "")
+    print(f"[INFO] run_automation resolved fields: ref_id={ref_id}, bucket_cat={bucket_cat_input}, start_date={start_date_input}, end_date={end_date_input}, sim_id={sim_id}, plant={plant}, material={material}", file=sys.stderr)
 
-    # Mappings
     bucket_cat = "M" if "week" not in bucket_cat_input.lower() else "W"
     
     def convert_date(d_str):
@@ -436,24 +403,18 @@ def run_automation(page, sap_url, fields, filter_labels=None):
     bom_use = "1" if "production" in bom_use_input.lower() or bom_use_input == "1" else bom_use_input
     task_list = "1" if "production" in task_list_input.lower() or task_list_input == "1" else task_list_input
 
-    # Construct the JSON select-options parameters
-    # Dynamically build job_params to support comma‑separated multi‑value fields
     def split_vals(val):
-        # Split on commas and trim whitespace
         return [p.strip() for p in str(val).split(",") if p.strip()]
 
     job_params = {"VALUES": []}
 
-    # Helper to add a parameter entry
     def add_param(name, raw):
         parts = split_vals(raw)
         t_vals = [{"SIGN": "I", "OPTION": "EQ", "LOW": p, "HIGH": ""} for p in parts]
         job_params["VALUES"].append({"NAME": name, "T_VALUE": t_vals})
 
-    # Populate parameters
     add_param("P_REFID", ref_id)
     add_param("P_REFD", ref_desc)
-    # Bucket category expects M or W – convert if needed
     bucket_val = "M" if "week" not in bucket_cat.lower() else "W"
     add_param("P_BUCK", bucket_val)
     add_param("P_START", start_date)
@@ -465,8 +426,8 @@ def run_automation(page, sap_url, fields, filter_labels=None):
     add_param("SO_STLAN", bom_use)
     add_param("SO_PLANV", task_list)
 
-    # Constant / empty parameters required by the template
-    job_params["VALUES"].append({"NAME": "P_DEL", "T_VALUE": [{"SIGN": "I", "OPTION": "EQ", "LOW": "", "HIGH": ""}]})
+    p_del_val = "X" if str(sorted_fields.get("Delete Existing pMRP Data", "")).strip().lower() in ["true", "x", "1"] else ""
+    job_params["VALUES"].append({"NAME": "P_DEL", "T_VALUE": [{"SIGN": "I", "OPTION": "EQ", "LOW": p_del_val, "HIGH": ""}]})
     job_params["VALUES"].append({"NAME": "SO_MMSTA", "T_VALUE": []})
     job_params["VALUES"].append({"NAME": "SO_MSTAE", "T_VALUE": []})
     job_params["VALUES"].append({"NAME": "P_TOLER", "T_VALUE": [{"SIGN": "I", "OPTION": "EQ", "LOW": 2, "HIGH": ""}]})
@@ -479,7 +440,6 @@ def run_automation(page, sap_url, fields, filter_labels=None):
         const jobParamsStr = '{json.dumps(job_params)}';
         const encodedParams = encodeURIComponent(jobParamsStr);
         
-        // 1. Fetch CSRF token
         const metadataRes = await fetch("/sap/opu/odata/sap/APJ_JOB_MANAGEMENT_SRV/$metadata?sap-client=100", {{
             headers: {{ "x-csrf-token": "fetch" }}
         }});
@@ -489,7 +449,6 @@ def run_automation(page, sap_url, fields, filter_labels=None):
             return {{ success: false, error: "Failed to fetch CSRF token" }};
         }}
         
-        // 2. Fetch Job Template details to get ETag
         const templateRes = await fetch("/sap/opu/odata/sap/APJ_JOB_MANAGEMENT_SRV/JobTemplateSet?sap-client=100&$filter=JobTemplateName eq 'SAP_SCM_PMRP_CREATE_C_DEFAULT'", {{
             headers: {{
                 "Accept": "application/json",
@@ -500,10 +459,8 @@ def run_automation(page, sap_url, fields, filter_labels=None):
         if (!templateData.d || !templateData.d.results || templateData.d.results.length === 0) {{
             return {{ success: false, error: "Failed to fetch Job Template data" }};
         }}
-        console.error("METADATA_PARAMS:" + templateData.d.results[0].JobParameterValues);
         const etag = templateData.d.results[0].__metadata.etag;
         
-        // 3. Prepare Validation multipart request
         const valBoundary = "batch_val_check";
         const valChangeset = "changeset_val_check";
         const valBody = [
@@ -543,13 +500,11 @@ def run_automation(page, sap_url, fields, filter_labels=None):
         }});
         const valText = await valRes.text();
 
-        // 4. Check validation success
         const valSuccessful = !valText.includes('"SuccessfulInd":false');
         if (!valSuccessful) {{
             return {{ success: false, validationFailed: true, valResponse: valText, schedResponse: "", metadataXml: metadataXml }};
         }}
 
-        // 5. If validation passes, construct and execute ScheduleJob PUT batch call
         const schedBoundary = "batch_sched_run";
         const schedChangeset = "changeset_sched_run";
         const now = new Date();
@@ -621,11 +576,9 @@ def run_automation(page, sap_url, fields, filter_labels=None):
     sched_resp = result.get("schedResponse", "")
     
     if not is_success:
-        # Handle Validation or Scheduling Failure
         error_details = []
         resp_text = sched_resp if sched_resp else val_resp
         
-        # Match sap-message header JSON
         sap_msg_str = ""
         msg_match = re.search(r'sap-message:\s*({.*?})(?:\r?\n|$)', resp_text)
         if msg_match:
@@ -648,35 +601,31 @@ def run_automation(page, sap_url, fields, filter_labels=None):
         error_summary = "\n".join(error_details)
         print(f"[WARNING] SAP Action Failed:\n{error_summary}", file=sys.stderr)
         
-        # Take verification failure screenshot
         try:
             page.screenshot(path="job_check_failed.png")
         except Exception:
             pass
             
-        return f"""# 📋 SAP pMRP Automation Report
+        return f"""# SAP pMRP Automation Report
 
-### ⚠️ SAP Validation Failed
+### SAP Validation Failed
 The parameters were validated, but SAP returned validation errors.
 
-### 🔍 Validation Details:
+### Validation Details:
 {error_summary}
 
 > [!WARNING]
 > The job was not scheduled. Please adjust your parameters and try again."""
 
-    # Success Flow
     print("[SUCCESS] Job created and scheduled successfully. Capturing confirmation screenshots...", file=sys.stderr)
     
-    # 1. Take screenshot of the Application Jobs list showing the scheduled job
     base_url = sap_url.rstrip('/')
     list_url = base_url + "/ui#PMRPSimulation-create"
     print(f"[INFO] Navigating to Application Jobs List: {list_url}", file=sys.stderr)
     page.goto(list_url, wait_until="load", timeout=0)
-    page.wait_for_timeout(3000) # Let the table/log records load
+    page.wait_for_timeout(3000)
     page.screenshot(path="job_scheduled_success.png")
     
-    # 2. Take screenshot of the pMRP Simulation Dashboard
     sim_url = "https://my401292.s4hana.cloud.sap/ui#PMRPSimulation-simulate&/?sap-iapp-state=AS99TB9M6NIPS212WLIDXZAZFMU5EJOUSCH0YFU4&sap-iapp-state--history=TAS52YK80GBQW9L57V0V096OXAXDS5RO3QH89PFSA"
     print(f"[INFO] Navigating directly to pMRP Simulation URL: {sim_url}", file=sys.stderr)
     page.goto(sim_url, wait_until="load", timeout=0)
@@ -690,33 +639,787 @@ The parameters were validated, but SAP returned validation errors.
         details_lines.append(f"* **{field_name}:** `{field_val}`")
     details_summary = "\n".join(details_lines)
 
-    return f"""# 📋 SAP pMRP Automation Report
+    return f"""# SAP pMRP Automation Report
 
-### ✅ Execution Succeeded
+### Execution Succeeded
 The pMRP simulation job has been successfully created, validated, and scheduled in SAP.
 
-### 🔍 Execution Details:
+### Execution Details:
 {details_summary}
 * **Redirection URL:** Navigated to pMRP Simulation Dashboard successfully."""
 
-if __name__ == "__main__":
+def ensure_logged_in(page: Page, context: BrowserContext, target_url: str):
+    load_dotenv()
+    sap_email = os.getenv("SAP_EMAIL")
+    sap_password = os.getenv("SAP_PASSWORD")
+    state_path = "sap_session_state.json"
+    
+    print(f"[INFO] Navigating to {target_url}...", file=sys.stderr)
+    page.goto(target_url, wait_until="domcontentloaded", timeout=0)
+    
+    print("[INFO] Waiting for session/page determination...", file=sys.stderr)
+    # Wait for either username input, shell header, user settings button or iframe
+    locator = page.locator("#j_username, #shell-header, #userActionsMenuHeaderButton, iframe[src*='webgui'], [id*='shell-header']")
+    try:
+        locator.first.wait_for(state="visible", timeout=45000)
+    except Exception as e:
+        print(f"[WARNING] Settle timeout reached: {e}", file=sys.stderr)
+    
+    # Check explicitly which elements are visible to decide path
+    is_login = page.locator("#j_username").first.is_visible()
+    is_logged_in = page.locator("#shell-header, #userActionsMenuHeaderButton, [id*='shell-header']").first.is_visible()
+    
+    if is_login:
+        print("[INFO] Session expired or invalid. Performing login...", file=sys.stderr)
+        page.locator("#j_username").fill(sap_email)
+        page.locator("#j_password").fill(sap_password)
+        page.locator(".fn-button__text", has_text="Continue").click()
+        print("[INFO] Clicked login Continue button. Waiting for shell header...", file=sys.stderr)
+        
+        shell_header_selector = "#shell-header, #userActionsMenuHeaderButton, [id*='shell-header']"
+        page.locator(shell_header_selector).first.wait_for(state="visible", timeout=60000)
+        
+        context.storage_state(path=state_path)
+        print(f"[SUCCESS] Login successful! Session state saved to {state_path}.", file=sys.stderr)
+        page.wait_for_timeout(5000)
+    elif is_logged_in:
+        print("[INFO] Active session detected. Proceeding...", file=sys.stderr)
+    else:
+        # Neither is visible, meaning page failed to load or has major connection issues
+        raise Exception("Failed to load page. Neither login screen nor SAP application elements are visible. Title: " + page.title())
+
+def ensure_session(force=False):
+    load_dotenv()
+    sap_url = os.getenv("SAP_URL")
+    state_path = "sap_session_state.json"
+    
+    if not force and os.path.exists(state_path):
+        print("[INFO] Session state already exists. Skipping pre-warming.", file=sys.stderr)
+        return
+        
+    print("[INFO] Pre-warming session state...", file=sys.stderr)
+    target_url = sap_url.rstrip('/') + "/ui"
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+        try:
+            ensure_logged_in(page, context, target_url)
+            print("[SUCCESS] Session pre-warmed successfully.", file=sys.stderr)
+        except Exception as e:
+            print(f"[WARNING] Session pre-warming failed: {e}", file=sys.stderr)
+        finally:
+            browser.close()
+
+def parse_period_string(date_str: str, planning_period: str) -> str:
     import datetime
-    suffix = datetime.datetime.now().strftime("%m%d%H%M%S")
-    test_fields = {
-        "ID for Reference Data": f"REF_{suffix}",
-        "Reference Description": f"REFERENCE {suffix}",
-        "Bucket Category": "Month",
-        "Start Date of Reference": "01.07.2026",
-        "End Date of Reference": "01.10.2026",
-        "Simulation ID": f"SIM_{suffix}",
-        "Simulation Description": f"PLANNING TEST {suffix}",
-        "BOM Usage": "1",
-        "Task List Usage": "Production",
-        "Plant": "1001",
-        "Material": "3381"
+    date_str = str(date_str).strip()
+    parsed_date = None
+    
+    # 1. MM.YYYY or M.YYYY
+    m = re.match(r'^(\d{1,2})\.(\d{4})$', date_str)
+    if m:
+        parsed_date = datetime.date(int(m.group(2)), int(m.group(1)), 1)
+    
+    # 2. YYYY-MM-DD
+    if not parsed_date:
+        m = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$', date_str)
+        if m:
+            parsed_date = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            
+    # 3. MM/YYYY or M/YYYY
+    if not parsed_date:
+        m = re.match(r'^(\d{1,2})/(\d{4})$', date_str)
+        if m:
+            parsed_date = datetime.date(int(m.group(2)), int(m.group(1)), 1)
+            
+    # 4. Words like "June 2026" or "Jun 2026"
+    if not parsed_date:
+        for fmt in ["%B %Y", "%b %Y", "%B, %Y", "%b, %Y"]:
+            try:
+                dt = datetime.datetime.strptime(date_str, fmt)
+                parsed_date = dt.date()
+                break
+            except Exception:
+                pass
+                
+    if parsed_date:
+        if planning_period == "M":
+            return f"M {parsed_date.month:02d}.{parsed_date.year}"
+        elif planning_period == "W":
+            iso_yr, iso_wk, _ = parsed_date.isocalendar()
+            return f"W {iso_wk:02d}.{iso_yr}"
+        else: # Day
+            return f"D {parsed_date.day:02d}.{parsed_date.month:02d}.{parsed_date.year}"
+            
+    # 5. Direct week like WW.YYYY or WW/YYYY or W28 2026
+    m = re.match(r'^(?:W)?(\d{1,2})[-/.](\d{4})$', date_str, re.IGNORECASE)
+    if m and planning_period == "W":
+        return f"W {int(m.group(1)):02d}.{m.group(2)}"
+        
+    return date_str.upper()
+
+def create_pir_automation(
+    material: str,
+    plant: str,
+    requirements_plan: str = "",
+    mrp_area: str = "",
+    version: str = "00",
+    planning_period: str = "M",
+    start_date: str = "",
+    end_date: str = "",
+    demands: list = None
+) -> str:
+    load_dotenv()
+    sap_url = os.getenv("SAP_URL")
+    target_url = sap_url.rstrip('/') + "/ui#ForecastDemand-create?sap-ui-tech-hint=GUI"
+    state_path = "sap_session_state.json"
+    
+    if not demands:
+        demands = []
+        
+    print(f"[INFO] Running create_pir_automation for material {material}, plant {plant}...", file=sys.stderr)
+    
+    planning_period = str(planning_period).upper().strip()
+    
+    if not start_date or not end_date:
+        import datetime
+        parsed_dates = []
+        for d in demands:
+            date_str = d.get("date") or d.get("period") or d.get("month") or d.get("week") or d.get("day")
+            if not date_str:
+                continue
+            date_str = str(date_str).strip()
+            
+            m = re.match(r'^(\d{1,2})\.(\d{4})$', date_str)
+            if m:
+                parsed_dates.append(datetime.date(int(m.group(2)), int(m.group(1)), 1))
+                continue
+            m = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$', date_str)
+            if m:
+                parsed_dates.append(datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+                continue
+            m = re.match(r'^(\d{1,2})/(\d{4})$', date_str)
+            if m:
+                parsed_dates.append(datetime.date(int(m.group(2)), int(m.group(1)), 1))
+                continue
+            try:
+                dt = datetime.datetime.strptime(date_str, "%B %Y")
+                parsed_dates.append(dt.date())
+                continue
+            except Exception:
+                pass
+            try:
+                dt = datetime.datetime.strptime(date_str, "%b %Y")
+                parsed_dates.append(dt.date())
+                continue
+            except Exception:
+                pass
+                
+        if parsed_dates:
+            min_date = min(parsed_dates)
+            max_date = max(parsed_dates)
+            if not start_date:
+                start_date = f"01.{min_date.month:02d}.{min_date.year}"
+            if not end_date:
+                import calendar
+                last_day = calendar.monthrange(max_date.year, max_date.month)[1]
+                end_date = f"{last_day:02d}.{max_date.month:02d}.{max_date.year}"
+        else:
+            if not start_date:
+                start_date = "01.06.2026"
+            if not end_date:
+                end_date = "31.12.2026"
+                
+    print(f"[INFO] Calculated dates: start_date={start_date}, end_date={end_date}", file=sys.stderr)
+    
+    with sync_playwright() as p:
+        headless = os.getenv("SAP_HEADLESS", "true").lower() == "true"
+        browser = p.chromium.launch(headless=headless, args=[] if headless else ["--start-maximized"])
+        context_args = {}
+        if os.path.exists(state_path):
+            context_args["storage_state"] = state_path
+        if not headless:
+            context_args["no_viewport"] = True
+        context = browser.new_context(**context_args)
+        page = context.new_page()
+        try:
+            ensure_logged_in(page, context, target_url)
+            
+            frame_obj = None
+            for attempt in range(25):
+                for f in page.frames:
+                    if "webgui" in f.url:
+                        frame_obj = f
+                        break
+                if frame_obj:
+                    break
+                page.wait_for_timeout(2000)
+                
+            if not frame_obj:
+                frame_urls = [f.url for f in page.frames]
+                raise Exception(f"WebGUI frame not found! Available frame URLs: {frame_urls}")
+                
+            print("[INFO] Filling initial screen fields...", file=sys.stderr)
+            material_input = frame_obj.locator('input[title="Material Number"]').first
+            material_input.wait_for(state="visible", timeout=90000)
+            material_input.fill(material)
+            frame_obj.locator('input[title="Plant"]').fill(plant)
+            
+            req_plan_input = frame_obj.locator('input[title="Requirements Plan"]')
+            if requirements_plan and req_plan_input.count() > 0:
+                req_plan_input.fill(requirements_plan)
+                
+            mrp_area_input = frame_obj.locator('input[title="MRP Area"]')
+            if mrp_area and mrp_area_input.count() > 0:
+                mrp_area_input.fill(mrp_area)
+                
+            version_input = frame_obj.locator('input[title="Version"]')
+            if version and version_input.count() > 0:
+                version_input.fill(version)
+                
+            frame_obj.locator('input[title="Start of the Period to Be Evaluated"]').fill(start_date)
+            frame_obj.locator('input[title="End of the Period of Examination"]').fill(end_date)
+            frame_obj.locator('input[title="Period indicator (day, week, month, posting period)"]').fill(planning_period)
+            
+            print("[INFO] Navigating to Planning Table...", file=sys.stderr)
+            frame_obj.locator('input[title="Material Number"]').press("Enter")
+            page.wait_for_timeout(5000)
+            
+            for f in page.frames:
+                if "webgui" in f.url:
+                    frame_obj = f
+                    break
+            
+            status_text = ""
+            status_el = frame_obj.locator('#wnd\\[0\\]\\/sbar_msg-txt, .lsStatusBar-text').first
+            if status_el.count() > 0:
+                status_text = status_el.inner_text()
+                print(f"[INFO] Status bar text: '{status_text}'", file=sys.stderr)
+                if "blocked" in status_text.lower() or "locked" in status_text.lower():
+                    if os.path.exists(state_path):
+                        try:
+                            os.remove(state_path)
+                            print("[INFO] Deleted cached session state due to lock/block.", file=sys.stderr)
+                        except Exception:
+                            pass
+                    raise Exception(f"Material or requirement is blocked/locked: {status_text}")
+            
+            prefix_info = frame_obj.evaluate("""
+            () => {
+                const cells = Array.from(document.querySelectorAll('[id*="[1,1]_c"]'));
+                if (cells.length > 0) {
+                    return cells[0].id.split('[')[0];
+                }
+                const any_cell = Array.from(document.querySelectorAll('[id*="[1,"]'));
+                if (any_cell.length > 0) {
+                    const match = any_cell[0].id.match(/(M0:[^\[]+)\[/);
+                    if (match) return match[1];
+                }
+                return null;
+            }
+            """)
+            
+            if not prefix_info:
+                raise Exception("Table cells not found. Cannot determine table prefix.")
+                
+            headers_map = frame_obj.evaluate("""
+            (prefix) => {
+                const map = {};
+                const headers = Array.from(document.querySelectorAll('[id^="' + prefix + '[0,"]'));
+                headers.forEach(h => {
+                    const id = h.id;
+                    const parts = id.split('[0,');
+                    if (parts.length > 1) {
+                        const col_idx = parts[1].split(']')[0];
+                        const text = h.textContent.trim();
+                        const match = text.match(/([MWD]\\s+\\d{2}\\.\\d{2,4})/i) || text.match(/(\\d{2}\\.\\d{2}\\.\\d{4})/);
+                        if (match) {
+                            map[match[0].toUpperCase()] = col_idx;
+                        } else {
+                            map[text.toUpperCase()] = col_idx;
+                        }
+                    }
+                });
+                return map;
+            }
+            """, prefix_info)
+            
+            print(f"[INFO] Extracted Headers map: {headers_map}", file=sys.stderr)
+            
+            for item in demands:
+                date_val = item.get("date") or item.get("period") or item.get("month") or item.get("week") or item.get("day")
+                qty = item.get("quantity") or item.get("qty")
+                if date_val is None or qty is None:
+                    continue
+                
+                period_key = parse_period_string(date_val, planning_period).upper()
+                
+                matched_col = None
+                for h_key, col_idx in headers_map.items():
+                    h_key_clean = h_key.strip().upper()
+                    if h_key_clean and (period_key in h_key_clean or h_key_clean in period_key):
+                        matched_col = col_idx
+                        break
+                
+                if matched_col is None:
+                    print(f"[WARNING] Period key '{period_key}' not found in headers map. Skipping...", file=sys.stderr)
+                    continue
+                    
+                cell_id = f"{prefix_info}[1,{matched_col}]_c"
+                print(f"[INFO] Entering quantity {qty} into cell {cell_id} for period {period_key}...", file=sys.stderr)
+                
+                entered = False
+                for attempt in range(5):
+                    try:
+                        # Refresh frame reference
+                        for f in page.frames:
+                            if "webgui" in f.url:
+                                frame_obj = f
+                                break
+                        
+                        cell_locator = frame_obj.locator(f'[id="{cell_id}"]').first
+                        cell_locator.scroll_into_view_if_needed(timeout=5000)
+                        cell_locator.click(force=True, timeout=5000)
+                        page.wait_for_timeout(300)
+                        
+                        page.keyboard.press("Control+A")
+                        page.wait_for_timeout(100)
+                        page.keyboard.press("Backspace")
+                        page.wait_for_timeout(100)
+                        page.keyboard.type(str(qty))
+                        page.wait_for_timeout(100)
+                        page.keyboard.press("Enter")
+                        page.wait_for_timeout(1500)
+                        entered = True
+                        break
+                    except Exception as cell_err:
+                        print(f"[WARNING] Cell entry failed (attempt {attempt+1}): {cell_err}. Retrying...", file=sys.stderr)
+                        page.wait_for_timeout(2000)
+                        
+                if not entered:
+                    raise Exception(f"Failed to enter quantity into cell {cell_id} after 5 attempts.")
+                
+            page.screenshot(path="md61_grid_populated.png")
+            
+            print("[INFO] Saving planning table...", file=sys.stderr)
+            save_locator = frame_obj.locator('div[title=" (Ctrl+S)"], [id$="btn[11]"], [id$="btn[11]-r"]').first
+            save_locator.click(force=True)
+            page.wait_for_timeout(5000)
+            
+            final_status = ""
+            if status_el.count() > 0:
+                final_status = status_el.inner_text()
+            print(f"[SUCCESS] Final status message: '{final_status}'", file=sys.stderr)
+            page.screenshot(path="md61_grid_saved.png")
+            
+            if "saved" in final_status.lower() or "success" in final_status.lower() or final_status == "":
+                return f"PIR created/updated successfully. Status: {final_status}"
+            else:
+                raise Exception(f"Failed to save PIR: {final_status}")
+                
+        except Exception as e:
+            print(f"[ERROR] create_pir_automation failed: {e}", file=sys.stderr)
+            try:
+                page.screenshot(path="md61_error.png")
+                cancel_btn = frame_obj.locator('[id$="btn[12]"], [title="Cancel (F12)"]').first
+                if cancel_btn.count() > 0 and cancel_btn.is_visible():
+                    cancel_btn.click(force=True)
+                    page.wait_for_timeout(2000)
+            except Exception:
+                pass
+            raise e
+        finally:
+            try:
+                smart_logout(page, target_url)
+            except Exception:
+                pass
+            browser.close()
+
+def dismiss_communication_error(page: Page):
+    try:
+        dialog = page.locator('div[role="dialog"]').first
+        if dialog.is_visible():
+            close_btn = dialog.locator('button:has-text("Close")').first
+            if close_btn.is_visible():
+                print("[INFO] Dismissing SAP Communication error dialog...", file=sys.stderr)
+                close_btn.click(force=True)
+                page.wait_for_timeout(2000)
+    except Exception:
+        pass
+
+def get_simulation_kpis(page: Page) -> dict:
+    # Wait for the first KPI to be attached in the DOM
+    page.locator('[id*="Capacity_Issues::NumberOfCapacityIssues::Value"]').first.wait_for(state="attached", timeout=30000)
+    
+    # Wait for value to load (not empty)
+    for _ in range(15):
+        val = page.locator('[id*="Capacity_Issues::NumberOfCapacityIssues::Value"]').first.text_content()
+        if val and val.strip() != "":
+            break
+        page.wait_for_timeout(1000)
+    
+    kpis = {}
+    selectors = {
+        "Capacity Issues": '[id*="Capacity_Issues::NumberOfCapacityIssues::Value"]',
+        "Delivery Performance": '[id*="Delivery_Performance::TopLvlDmndUndrdelivRatioInPct::Value"]',
+        "Invalid Source": '[id*="Invalid_SoS::NumberOfProductsWithMissingSOS::Value"]',
+        "Violated Constraints": '[id*="Supplier_Issues::PMRPNumberOfConstraintIssues::Value"]'
     }
-    test_filters = {
-        "Task List Usage": "Description"
-    }
-    res = run_automation(fields=test_fields, filter_labels=test_filters)
-    print(f"\n[RESULT] {res}")
+    for key, selector in selectors.items():
+        try:
+            val = page.locator(selector).first.text_content()
+            kpis[key] = val.strip() if val else "0"
+        except Exception:
+            kpis[key] = "unknown"
+            
+    # Count visible red inputs
+    try:
+        red_count = page.locator(".sapMInputBaseContentWrapperError input").count()
+        kpis["Red Input Cells"] = str(red_count)
+    except Exception:
+        kpis["Red Input Cells"] = "0"
+        
+    return kpis
+
+def wait_for_simulation_ready(page: Page, sim_url: str):
+    print("[INFO] Waiting for simulation data to be fully calculated and loaded...", file=sys.stderr)
+    for attempt in range(15): # Wait up to 2.5 minutes (15 * 10 seconds)
+        page.goto(sim_url, wait_until="domcontentloaded", timeout=0)
+        page.wait_for_timeout(5000)
+        
+        try:
+            page.locator('[id*="Capacity_Issues::NumberOfCapacityIssues::Value"]').first.wait_for(state="attached", timeout=15000)
+            val = page.locator('[id*="Capacity_Issues::NumberOfCapacityIssues::Value"]').first.text_content()
+            if val and val.strip() != "" and "Empty" not in val and "empty" not in val.lower():
+                print("[INFO] Simulation header ready. Waiting for table data...", file=sys.stderr)
+                for _ in range(15):
+                    try:
+                        is_busy = page.locator('[id*="simulationTableId"]').first.evaluate("el => el.getAttribute('aria-busy') === 'true' || el.classList.contains('sapUiTableBusy')")
+                        if not is_busy:
+                            break
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(1000)
+                for _ in range(15):
+                    try:
+                        input_val = page.locator('.sapMInputBaseInner').first.evaluate("el => el.value")
+                        if input_val and input_val.strip() != "":
+                            break
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(1000)
+                page.wait_for_timeout(3000)
+                print(f"[INFO] Simulation data and table are fully loaded! Capacity Issues: {val.strip()}", file=sys.stderr)
+                return
+        except Exception:
+            pass
+            
+        print(f"[INFO] Simulation is still processing (attempt {attempt+1}/15). Waiting 10 seconds...", file=sys.stderr)
+        page.wait_for_timeout(10000)
+        
+    raise Exception("Simulation data failed to calculate/load within 2.5 minutes.")
+
+def run_demand_shifting(page: Page) -> bool:
+    print("[INFO] Skipping demand shifting as requested by user.", file=sys.stderr)
+    return False
+
+def run_capacity_adaptation(page: Page):
+    print("[INFO] Running capacity adaptation flow from main dashboard...", file=sys.stderr)
+    sim_url = page.url
+    print(f"[INFO] Main simulation URL stored: {sim_url}", file=sys.stderr)
+    
+    for iteration in range(3):
+        # Scroll the main dashboard table to the right to make sure November/December columns render!
+        print("[INFO] Scrolling main dashboard table to the right...", file=sys.stderr)
+        page.evaluate("""
+        () => {
+            const scrollables = Array.from(document.querySelectorAll('*')).filter(el => el.scrollWidth > el.clientWidth);
+            scrollables.forEach(el => el.scrollLeft = el.scrollWidth);
+        }
+        """)
+        page.wait_for_timeout(2000)
+        
+        # 1. Find red input or status cells on the main dashboard
+        red_inputs = page.locator(".sapMObjStatusError, .sapMValueStateError, .sapMInputBaseContentWrapperError input")
+        count = red_inputs.count()
+        print(f"[INFO] Iteration {iteration+1}: Found {count} red elements on main dashboard", file=sys.stderr)
+        if count == 0:
+            print("[INFO] No more red elements found on main dashboard. Adaptation complete.", file=sys.stderr)
+            break
+            
+        # Click the first red element to open the Inspector
+        print(f"[INFO] Clicking red cell 1 of {count} to open Inspector...", file=sys.stderr)
+        try:
+            red_inputs.first.evaluate("el => { el.scrollIntoView({ block: 'center', inline: 'center' }); el.focus(); el.click(); }")
+            page.wait_for_timeout(4000)
+        except Exception as e:
+            print(f"[WARNING] JS click on red cell failed: {e}", file=sys.stderr)
+            red_inputs.first.click(force=True)
+            page.wait_for_timeout(4000)
+            
+        # Click "Capacity Plan Simulation" in the Inspector panel
+        print("[INFO] Clicking 'Capacity Plan Simulation' in the Inspector panel...", file=sys.stderr)
+        clicked = page.evaluate("""
+        () => {
+            const links = Array.from(document.querySelectorAll('.sapMLnk, a, button, .sapMText'));
+            const target = links.find(l => l.textContent.trim().includes("Capacity Plan Simulation") && l.offsetHeight > 0);
+            if (target) {
+                target.click();
+                return true;
+            }
+            return false;
+        }
+        """)
+        if not clicked:
+            print("[WARNING] Could not find Capacity Plan Simulation link in Inspector. Falling back to menu navigation...", file=sys.stderr)
+            page.locator('[id="simulationViewMenuButtonId-internalBtn"]').first.click(force=True)
+            page.wait_for_timeout(2000)
+            page.locator('.sapMMenuItem:has-text("Capacity Plan Simulation")').first.click(force=True)
+            
+        page.wait_for_timeout(8000)
+        
+        # 2. Scroll the Capacity Plan Simulation table to the right so columns are loaded in the DOM
+        print("[INFO] Scrolling Capacity Plan Simulation table to the right...", file=sys.stderr)
+        page.evaluate("""
+        () => {
+            const visibleTable = Array.from(document.querySelectorAll('[id*="unGroupTableId"], [id*="simulationTableId"]')).find(el => {
+                const style = window.getComputedStyle(el);
+                return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetHeight > 0;
+            });
+            if (visibleTable) {
+                const hsb = document.getElementById(visibleTable.id + "-hsb");
+                if (hsb) {
+                    hsb.scrollLeft = hsb.scrollWidth;
+                    hsb.dispatchEvent(new Event('scroll'));
+                }
+            }
+        }
+        """)
+        page.wait_for_timeout(3000)
+        
+        # Scan table columns to identify which months/weeks/days have capacity issues (red cells)
+        print("[INFO] Scanning table columns to identify overloaded periods...", file=sys.stderr)
+        detected_periods = page.evaluate("""
+        () => {
+            const visibleTable = Array.from(document.querySelectorAll('[id*="unGroupTableId"], [id*="simulationTableId"]')).find(el => {
+                const style = window.getComputedStyle(el);
+                return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetHeight > 0;
+            });
+            if (!visibleTable) return [];
+            
+            let el = visibleTable;
+            let table = null;
+            while (el) {
+                if (el.id) {
+                    table = sap.ui.getCore().byId(el.id);
+                    if (table && (table.getMetadata().getName() === "sap.ui.table.Table" || table.getMetadata().getName().includes("Table"))) {
+                        break;
+                    }
+                }
+                el = el.parentElement;
+            }
+            if (!table) return [];
+            
+            // Build the map of column ID to header text
+            const colMap = {};
+            table.getColumns().forEach(col => {
+                const id = col.getId();
+                const label = col.getLabel();
+                const text = label ? (label.getText ? label.getText() : label.getProperty("text")) : "";
+                if (id && text) {
+                    colMap[id] = text.trim();
+                }
+            });
+            
+            // Search all cells in the table DOM for red elements
+            const redMonths = [];
+            const cells = Array.from(document.querySelectorAll('td'));
+            cells.forEach(cell => {
+                const colid = cell.getAttribute('data-sap-ui-colid');
+                if (!colid || !colMap[colid]) return;
+                
+                const textEls = Array.from(cell.querySelectorAll('span, a, div, b'));
+                const hasRed = textEls.some(el => {
+                    const style = window.getComputedStyle(el);
+                    const color = style.color || "";
+                    const match = color.match(/rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/);
+                    if (match) {
+                        const r = parseInt(match[1], 10);
+                        const g = parseInt(match[2], 10);
+                        const b = parseInt(match[3], 10);
+                        return r > 150 && g < 50 && b < 50;
+                    }
+                    return false;
+                });
+                if (hasRed) {
+                    const monthText = colMap[colid];
+                    if (monthText && !redMonths.includes(monthText)) {
+                        redMonths.push(monthText);
+                    }
+                }
+            });
+            
+            window._pmrpRedMonths = redMonths;
+            return redMonths;
+        }
+        """)
+        print(f"[INFO] Detected overloaded periods requiring adaptation: {detected_periods}", file=sys.stderr)
+        
+        # 3. Select row 0 via UI5 setSelectedIndex on the resolved visible table
+        print("[INFO] Selecting row 0 using UI5 setSelectedIndex...", file=sys.stderr)
+        selected = page.evaluate("""
+        () => {
+            const visibleTable = Array.from(document.querySelectorAll('[id*="unGroupTableId"], [id*="simulationTableId"]')).find(el => {
+                const style = window.getComputedStyle(el);
+                return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetHeight > 0;
+            });
+            if (!visibleTable) return false;
+            
+            let el = visibleTable;
+            let table = null;
+            while (el) {
+                if (el.id) {
+                    table = sap.ui.getCore().byId(el.id);
+                    if (table && (table.getMetadata().getName() === "sap.ui.table.Table" || table.getMetadata().getName().includes("Table"))) {
+                        break;
+                    }
+                }
+                el = el.parentElement;
+            }
+            if (table) {
+                table.setSelectedIndex(0);
+                return true;
+            }
+            return false;
+        }
+        """)
+        print(f"[INFO] Row selection success: {selected}", file=sys.stderr)
+        page.wait_for_timeout(2000)
+        
+        btn = page.locator('button:has-text("Change Available Capacity")').first
+        is_disabled = btn.evaluate("el => el.disabled || el.getAttribute('aria-disabled') === 'true'")
+        if is_disabled:
+            print("[WARNING] Change Available Capacity button is still disabled. Force enabling selection...", file=sys.stderr)
+            # Try to click the Work Center cell FINISHIN as backup
+            finishin_cell = page.locator('td:has-text("FINISHIN"), span:has-text("FINISHIN"), text=FINISHIN').first
+            if finishin_cell.count() > 0:
+                finishin_cell.click(force=True)
+                page.wait_for_timeout(2000)
+                
+        # 4. Click "Change Available Capacity" button
+        print("[INFO] Clicking Change Available Capacity button...", file=sys.stderr)
+        btn.click(force=True)
+        page.wait_for_timeout(4000)
+        
+        # 5. Wait for Change Capacity Limit dialog/popover
+        page.locator('text=Change Capacity Limit').first.wait_for(state="visible", timeout=25000)
+        page.wait_for_timeout(2000)
+        
+        # 6. Select only overloaded buckets via high-performance UI5 API call
+        print("[INFO] Selecting only overloaded periods programmatically...", file=sys.stderr)
+        page.evaluate("""
+        () => {
+            const cb = sap.ui.getCore().byId("bucketSelection");
+            if (cb) {
+                const items = cb.getItems();
+                const selectedKeys = [];
+                const targetMonths = window._pmrpRedMonths || [];
+                items.forEach(item => {
+                    const itemText = item.getText().trim();
+                    const shouldSelect = targetMonths.length === 0 || targetMonths.some(m => itemText.includes(m) || m.includes(itemText));
+                    if (shouldSelect) {
+                        selectedKeys.push(item.getKey());
+                        cb.setSelectedKeys([...selectedKeys]);
+                        cb.fireSelectionChange({ changedItem: item, selected: true });
+                    }
+                });
+                cb.fireSelectionFinish({ selectedItems: cb.getSelectedItems() });
+            }
+        }
+        """)
+        page.wait_for_timeout(2000)
+        
+        # Save screenshot of selected dropdown
+        page.screenshot(path="change_capacity_dialog_debug.png")
+        
+        # 7. Click Adopt Proposal
+        print("[INFO] Clicking Adopt Proposal button...", file=sys.stderr)
+        page.locator('button:has-text("Adopt Proposal")').first.click(force=True)
+        page.wait_for_timeout(2000)
+        
+        # 8. Click Apply
+        print("[INFO] Clicking Apply button...", file=sys.stderr)
+        page.locator('button:has-text("Apply")').click(force=True)
+        
+        print("[INFO] Waiting for simulation to reconcile...", file=sys.stderr)
+        page.wait_for_timeout(8000)
+        
+        # 9. Return to main dashboard (Demand Plan Simulation) by reloading the dashboard directly
+        print("[INFO] Reloading main dashboard to refresh KPIs...", file=sys.stderr)
+        page.goto(sim_url, wait_until="domcontentloaded", timeout=0)
+        wait_for_simulation_ready(page, sim_url)
+
+def run_release_simulation(page: Page, sap_url: str):
+    list_url = sap_url.rstrip('/') + "/ui#PMRPSimulation-simulate"
+    print(f"[INFO] Navigating to simulations list URL: {list_url}", file=sys.stderr)
+    page.goto(list_url, wait_until="domcontentloaded", timeout=0)
+    
+    print("[INFO] Waiting for simulations table to load...", file=sys.stderr)
+    page.locator('text=SIM_PIR').first.wait_for(state="visible", timeout=30000)
+    page.wait_for_timeout(3000)
+    
+    print("[INFO] Checking if SIM_PIR Release button is active...", file=sys.stderr)
+    release_btn = page.locator('tr:has-text("SIM_PIR")').locator('button:has-text("Release")').first
+    
+    if release_btn.is_disabled():
+        print("[INFO] SIM_PIR Release button is disabled. The simulation is already released or in progress.", file=sys.stderr)
+        return
+        
+    print("[INFO] Clicking 'Release' button in the SIM_PIR row...", file=sys.stderr)
+    release_btn.click(force=True)
+    page.wait_for_timeout(3000)
+    
+    print("[INFO] Waiting for Release dialog...", file=sys.stderr)
+    page.locator('[id="idReleaseSimulationButton"]').first.wait_for(state="visible", timeout=15000)
+    page.wait_for_timeout(2000)
+    
+    print("[INFO] Checking 'Capacity Change Proposals' checkbox...", file=sys.stderr)
+    page.locator('[id="idChkBoxCapacity"]').click(force=True)
+    page.wait_for_timeout(1000)
+    
+    print("[INFO] Clicking dialog 'Release' button...", file=sys.stderr)
+    page.locator('[id="idReleaseSimulationButton"]').click(force=True)
+    
+    print("[INFO] Waiting for release process to initiate...", file=sys.stderr)
+    page.wait_for_timeout(10000)
+    
+    print("[SUCCESS] Simulation release flow completed successfully!", file=sys.stderr)
+
+def main():
+    load_dotenv()
+    sap_url = os.getenv("SAP_URL")
+    state_path = "sap_session_state.json"
+    sim_url = sap_url.rstrip('/') + "/ui#PMRPSimulation-simulate&/PmrpSimulation('SIM_PIR')"
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context_args = {}
+        if os.path.exists(state_path):
+            context_args["storage_state"] = state_path
+            
+        context = browser.new_context(**context_args)
+        page = context.new_page()
+        
+        try:
+            ensure_logged_in(page, context, sim_url)
+            run_capacity_adaptation(page)
+            run_release_simulation(page, sap_url)
+        except Exception as e:
+            print(f"[ERROR] Automation run failed: {e}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            browser.close()
+
+if __name__ == "__main__":
+    main()

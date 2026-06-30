@@ -1,16 +1,23 @@
 import copy
 from threading import Lock
 from datetime import datetime, timezone, timedelta
-from litellm.integrations.custom_logger import CustomLogger
+
+try:
+    from litellm.integrations.custom_logger import CustomLogger  # type: ignore
+except ImportError:
+    # Fallback/mock class to prevent IDE linting errors if litellm is not in the active workspace environment
+    class CustomLogger:  # type: ignore
+        def __init__(self, **kwargs):
+            pass
 
 print("[HOOK-PATCH] hooks.py is being imported!", flush=True)
 
 # Import target modules for optimization caching
 try:
-    from litellm.llms.sap.chat.transformation import GenAIHubOrchestrationConfig
-    import litellm.llms.sap.credentials as sap_credentials
-    import litellm.llms.sap.chat.transformation as sap_chat_transformation
-    import litellm.llms.sap.embed.transformation as sap_embed_transformation
+    from litellm.llms.sap.chat.transformation import GenAIHubOrchestrationConfig  # type: ignore
+    import litellm.llms.sap.credentials as sap_credentials  # type: ignore
+    import litellm.llms.sap.chat.transformation as sap_chat_transformation  # type: ignore
+    import litellm.llms.sap.embed.transformation as sap_embed_transformation  # type: ignore
 
     # 1. Patch deployment_url to cache it globally (avoids fetching deployments/configurations on every call)
     original_deployment_url = GenAIHubOrchestrationConfig.deployment_url
@@ -65,6 +72,50 @@ except Exception as e:
     logging.warning(f"Unable to apply SAP performance optimization patches: {e}")
 
 
+def sanitize_messages(messages):
+    """Sanitizes chat history to ensure empty assistant messages have content, preventing EOL validation failures."""
+    if not isinstance(messages, list):
+        return messages
+        
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+            
+        role = msg.get("role")
+        content = msg.get("content")
+        tool_calls = msg.get("tool_calls")
+        
+        if role == "assistant":
+            is_empty_content = False
+            if not content:
+                is_empty_content = True
+            elif isinstance(content, str) and not content.strip():
+                is_empty_content = True
+            elif isinstance(content, list):
+                if len(content) == 0:
+                    is_empty_content = True
+                else:
+                    all_empty = True
+                    for block in content:
+                        if isinstance(block, dict):
+                            if block.get("type") == "text" and block.get("text", "").strip():
+                                all_empty = False
+                            elif block.get("type") == "tool_use":
+                                all_empty = False
+                        else:
+                            all_empty = False
+                    if all_empty:
+                        is_empty_content = True
+                        
+            has_no_tool_calls = not tool_calls
+            
+            if is_empty_content and has_no_tool_calls:
+                print("[HOOK-PATCH] Found empty assistant message. Replacing content with placeholder.", flush=True)
+                msg["content"] = "Processing request..."
+                
+    return messages
+
+
 class SAPPerformanceOptimizer(CustomLogger):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -79,6 +130,19 @@ class SAPPerformanceOptimizer(CustomLogger):
     ):
         print(f"[HOOK-PATCH] SAPPerformanceOptimizer async_pre_call_hook called with call_type: {call_type}", flush=True)
         
+        # Route deprecated/EOL model to a working one
+        model = data.get("model")
+        if model == "claude-4-opus":
+            print("[HOOK-PATCH] Rewriting deprecated model 'claude-4-opus' -> 'claude-4.6-opus'", flush=True)
+            data["model"] = "claude-4.6-opus"
+        elif model == "sap/anthropic--claude-4-opus":
+            print("[HOOK-PATCH] Rewriting deprecated model 'sap/anthropic--claude-4-opus' -> 'sap/anthropic--claude-4.6-opus'", flush=True)
+            data["model"] = "sap/anthropic--claude-4.6-opus"
+
+        # Sanitize messages to avoid empty assistant message errors
+        if "messages" in data:
+            data["messages"] = sanitize_messages(data["messages"])
+
         # Force stable mode (no streaming)
         data["stream"] = False
         
@@ -107,6 +171,20 @@ def sanitize_request(**kwargs):
         return kwargs
     data = copy.deepcopy(data)
     
+    # Route deprecated/EOL model to a working one
+    for target in [data, kwargs]:
+        model = target.get("model")
+        if model == "claude-4-opus":
+            target["model"] = "claude-4.6-opus"
+        elif model == "sap/anthropic--claude-4-opus":
+            target["model"] = "sap/anthropic--claude-4.6-opus"
+
+    # Sanitize messages to avoid empty assistant message errors
+    if "messages" in data:
+        data["messages"] = sanitize_messages(data["messages"])
+    if "messages" in kwargs:
+        kwargs["messages"] = sanitize_messages(kwargs["messages"])
+
     # FORCE STABLE MODE
     data["stream"] = False
     kwargs["stream"] = False
