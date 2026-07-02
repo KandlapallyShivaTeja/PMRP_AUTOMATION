@@ -703,9 +703,17 @@ def resolve_dates(demands: list[dict[str, Any]], start_date: str, end_date: str)
             if m:
                 parsed_dates.append(datetime.date(int(m.group(2)), int(m.group(1)), 1))
                 continue
+            m = re.match(r'^(\d{1,2})\.(\d{1,2})\.(\d{4})$', date_str)
+            if m:
+                parsed_dates.append(datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1))))
+                continue
             m = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$', date_str)
             if m:
                 parsed_dates.append(datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+                continue
+            m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', date_str)
+            if m:
+                parsed_dates.append(datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1))))
                 continue
             m = re.match(r'^(\d{1,2})/(\d{4})$', date_str)
             if m:
@@ -844,7 +852,7 @@ def run_complete_pmrp_pipeline(
                     )
                     
                     # Navigate to jobs page to bootstrap OData correctly
-                    job_init_url = sap_url.rstrip('/') + "/ui#PMRPSimulation-create"
+                    job_init_url = sap_url.rstrip('/') + "/ui#PMRPSimulation-simulate"
                     page.goto(job_init_url, wait_until="domcontentloaded", timeout=0)
                     page.wait_for_timeout(3000)
                     
@@ -939,7 +947,7 @@ def run_complete_pmrp_pipeline(
                 
                 # Navigate to jobs page to bootstrap OData correctly
                 print("[INFO] Unified E2E: Navigating to jobs workspace to bootstrap OData...", file=sys.stderr)
-                job_init_url = sap_url.rstrip('/') + "/ui#PMRPSimulation-create"
+                job_init_url = sap_url.rstrip('/') + "/ui#PMRPSimulation-simulate"
                 page.goto(job_init_url, wait_until="domcontentloaded", timeout=0)
                 page.wait_for_timeout(3000)
                 

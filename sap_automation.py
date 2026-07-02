@@ -648,14 +648,6 @@ The parameters were validated, but SAP returned validation errors.
     page.wait_for_timeout(3000)
     page.screenshot(path="job_scheduled_success.png")
     
-    sim_url = "https://my401292.s4hana.cloud.sap/ui#PMRPSimulation-simulate&/?sap-iapp-state=AS99TB9M6NIPS212WLIDXZAZFMU5EJOUSCH0YFU4&sap-iapp-state--history=TAS52YK80GBQW9L57V0V096OXAXDS5RO3QH89PFSA"
-    print(f"[INFO] Navigating directly to pMRP Simulation URL: {sim_url}", file=sys.stderr)
-    page.goto(sim_url, wait_until="load", timeout=0)
-    print("[INFO] Waiting exactly 10 seconds on the pMRP Simulation dashboard...", file=sys.stderr)
-    page.wait_for_timeout(10000)
-    page.screenshot(path="job_simulated_dashboard.png")
-    print("[SUCCESS] Navigated to pMRP Simulation dashboard successfully.", file=sys.stderr)
-    
     details_lines = []
     for field_name, field_val in fields.items():
         details_lines.append(f"* **{field_name}:** `{field_val}`")
@@ -742,12 +734,24 @@ def parse_period_string(date_str: str, planning_period: str) -> str:
     m = re.match(r'^(\d{1,2})\.(\d{4})$', date_str)
     if m:
         parsed_date = datetime.date(int(m.group(2)), int(m.group(1)), 1)
+        
+    # 1.5 DD.MM.YYYY or D.M.YYYY
+    if not parsed_date:
+        m = re.match(r'^(\d{1,2})\.(\d{1,2})\.(\d{4})$', date_str)
+        if m:
+            parsed_date = datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
     
     # 2. YYYY-MM-DD
     if not parsed_date:
         m = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$', date_str)
         if m:
             parsed_date = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            
+    # 2.5 DD/MM/YYYY or D/M/YYYY
+    if not parsed_date:
+        m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', date_str)
+        if m:
+            parsed_date = datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
             
     # 3. MM/YYYY or M/YYYY
     if not parsed_date:
@@ -818,9 +822,17 @@ def create_pir_automation(
             if m:
                 parsed_dates.append(datetime.date(int(m.group(2)), int(m.group(1)), 1))
                 continue
+            m = re.match(r'^(\d{1,2})\.(\d{1,2})\.(\d{4})$', date_str)
+            if m:
+                parsed_dates.append(datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1))))
+                continue
             m = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$', date_str)
             if m:
                 parsed_dates.append(datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+                continue
+            m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', date_str)
+            if m:
+                parsed_dates.append(datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1))))
                 continue
             m = re.match(r'^(\d{1,2})/(\d{4})$', date_str)
             if m:
@@ -1014,6 +1026,46 @@ def create_pir_automation(
             
         active_page.screenshot(path="md61_grid_populated.png")
         
+        # Ensure Row 1 Active checkbox (column 'A') is checked
+        active_col = headers_map.get("A")
+        if active_col is not None:
+            print(f"[INFO] Ensuring Row 1 Active checkbox (column {active_col}) is checked...", file=sys.stderr)
+            try:
+                cb_status = frame_obj.evaluate("""
+                (params) => {
+                    const { prefix, activeCol } = params;
+                    const selector = `[id*="[1,${activeCol}]"]`;
+                    const elements = Array.from(document.querySelectorAll(selector));
+                    if (elements.length === 0) return { error: "No elements matching selector found" };
+                    
+                    const cb = elements.find(el => {
+                        return el.getAttribute("role") === "checkbox" || 
+                               el.tagName === "INPUT" || 
+                               el.className.includes("Checkbox") || 
+                               el.id.endsWith("-cb");
+                    }) || elements[0];
+                    
+                    let isChecked = false;
+                    if (cb.tagName === "INPUT") {
+                        isChecked = cb.checked;
+                    } else if (cb.getAttribute("aria-checked") !== null) {
+                        isChecked = cb.getAttribute("aria-checked") === "true";
+                    } else if (cb.className.includes("lsCheckbox--checked") || cb.className.includes("checked") || cb.className.includes("lsCheckbox-checked")) {
+                        isChecked = true;
+                    }
+                    
+                    if (!isChecked) {
+                        cb.click();
+                        return { clicked: true, before: isChecked };
+                    }
+                    return { clicked: false, before: isChecked };
+                }
+                """, {"prefix": prefix_info, "activeCol": active_col})
+                print(f"[INFO] Active checkbox status: {cb_status}", file=sys.stderr)
+                active_page.wait_for_timeout(1000)
+            except Exception as cb_err:
+                print(f"[WARNING] Failed to ensure Active checkbox is checked: {cb_err}", file=sys.stderr)
+        
         print("[INFO] Saving planning table...", file=sys.stderr)
         save_locator = frame_obj.locator('div[title=" (Ctrl+S)"], [id$="btn[11]"], [id$="btn[11]-r"]').first
         save_locator.click(force=True)
@@ -1025,7 +1077,7 @@ def create_pir_automation(
         print(f"[SUCCESS] Final status message: '{final_status}'", file=sys.stderr)
         active_page.screenshot(path="md61_grid_saved.png")
         
-        if "saved" in final_status.lower() or "success" in final_status.lower() or final_status == "":
+        if "saved" in final_status.lower() or "success" in final_status.lower() or "no data" in final_status.lower() or "no changes" in final_status.lower() or final_status == "":
             return f"PIR created/updated successfully. Status: {final_status}"
         else:
             raise Exception(f"Failed to save PIR: {final_status}")
@@ -1093,93 +1145,104 @@ def dismiss_communication_error(page: Page):
     except Exception:
         pass
 
+def switch_simulation_view(page: Page, view_names: list[str]):
+    import sys
+    print(f"[INFO] Switching view to one of: {view_names}", file=sys.stderr)
+    
+    # Locate all possible view switcher controls that are visible
+    switchers = page.locator(
+        'button:has-text("Simulation Views"):visible, '
+        '[id="simulationViewMenuButtonId-internalBtn"]:visible, '
+        '[id*="perspectiveSwitcherId-labelText"]:visible, '
+        '[id*="perspectiveSwitcherId"]:visible'
+    )
+    
+    if switchers.count() == 0:
+        print("[INFO] Switcher not immediately visible, waiting for it...", file=sys.stderr)
+        # Wait for any switcher to become visible
+        any_switcher = page.locator(
+            'button:has-text("Simulation Views"), '
+            '[id="simulationViewMenuButtonId-internalBtn"], '
+            '[id*="perspectiveSwitcherId-labelText"], '
+            '[id*="perspectiveSwitcherId"]'
+        ).first
+        any_switcher.wait_for(state="visible", timeout=12000)
+        switcher = any_switcher
+    else:
+        switcher = switchers.first
+        
+    # Check if switcher is a select/dropdown based on its id/class
+    switcher_id = switcher.get_attribute("id") or ""
+    is_select = "perspectiveSwitcherId" in switcher_id or switcher.locator('span.sapMSltArrow').count() > 0
+    
+    print(f"[INFO] Found view switcher (is_select={is_select}, id={switcher_id}). Clicking...", file=sys.stderr)
+    switcher.click(force=True)
+    page.wait_for_timeout(800)
+    
+    # Construct locators for the desired view items
+    locs = []
+    for name in view_names:
+        if is_select:
+            locs.append(f'.sapMSelectListItemText:has-text("{name}"), .sapMSelectListItem:has-text("{name}"), li:has-text("{name}")')
+        else:
+            locs.append(f'.sapMMenuItem:has-text("{name}"), .sapMMenuItemText:has-text("{name}"), li:has-text("{name}")')
+            
+    # Add general fallbacks
+    for name in view_names:
+        locs.append(f'.sapMMenuItem:has-text("{name}"), .sapMMenuItemText:has-text("{name}"), .sapMSelectListItemText:has-text("{name}"), .sapMSelectListItem:has-text("{name}"), li:has-text("{name}")')
+        
+    item_selector = ", ".join(locs)
+    item = page.locator(item_selector).first
+    item.wait_for(state="visible", timeout=8000)
+    try:
+        print(f"[INFO] Clicking menu item: {item.text_content().strip()}", file=sys.stderr)
+    except Exception:
+        pass
+    item.click(force=True)
+    page.wait_for_timeout(1500)
+
 def get_detailed_issues(page: Page) -> list[dict]:
     issues_list = []
     import sys
     try:
-        # Navigate directly using the switcher menu
-        header_btn = page.locator('[id="simulationViewMenuButtonId-internalBtn"]')
-        table_select = page.locator('[id*="perspectiveSwitcherId-labelText"], [id*="perspectiveSwitcherId"]')
+        print("[INFO] Navigating to Issue Worklist to extract detailed issues...", file=sys.stderr)
+        switch_simulation_view(page, ["Issue Worklist", "Issue List"])
         
-        switcher = None
-        is_select = False
+        # Wait dynamically for Issue Worklist table/rows
+        table_row = page.locator('tbody.sapMListItems tr.sapMListTblRow, tr.sapMListTblRow').first
+        table_row.wait_for(state="attached", timeout=12000)
+        page.wait_for_timeout(500)
         
-        if header_btn.count() > 0 and header_btn.is_visible():
-            switcher = header_btn
-            is_select = False
-        elif table_select.count() > 0 and table_select.first.is_visible():
-            switcher = table_select.first
-            is_select = True
-            
-        if switcher:
-            switcher.click(force=True)
-            page.wait_for_timeout(300)
-            
-            if is_select:
-                issue_item = page.locator('.sapMSelectListItemText:has-text("Issue Worklist"), .sapMSelectListItemText:has-text("Issue List"), .sapMSelectListItem:has-text("Issue Worklist"), li:has-text("Issue Worklist")').first
-            else:
-                issue_item = page.locator('.sapMMenuItem:has-text("Issue Worklist"), .sapMMenuItemText:has-text("Issue Worklist"), .sapMMenuItem:has-text("Issue List")').first
+        # Extract all issues
+        rows = page.locator('tbody.sapMListItems tr.sapMListTblRow, tr.sapMListTblRow').all()
+        print(f"[INFO] Found {len(rows)} issue rows in Issue Worklist", file=sys.stderr)
+        for r in rows:
+            cells = r.locator('td.sapMListTblCell').all()
+            if len(cells) >= 6:
+                cat = cells[0].text_content().strip()
+                obj = cells[1].text_content().strip().replace('\n', ' ')
+                months = cells[2].text_content().strip()
+                demands = cells[3].text_content().strip()
+                score = cells[4].text_content().strip()
+                overload = cells[5].text_content().strip()
+                cause = cells[6].text_content().strip() if len(cells) > 6 else ""
                 
-            try:
-                issue_item.wait_for(state="visible", timeout=4000)
-            except Exception:
-                # Fallback to search both
-                issue_item = page.locator('.sapMMenuItem:has-text("Issue Worklist"), .sapMMenuItemText:has-text("Issue Worklist"), .sapMSelectListItemText:has-text("Issue Worklist"), li:has-text("Issue Worklist"), .sapMMenuItem:has-text("Issue List")').first
-                issue_item.wait_for(state="visible", timeout=6000)
-                
-            print("[INFO] Navigating to Issue Worklist to extract detailed issues...", file=sys.stderr)
-            issue_item.click(force=True)
-            
-            # Wait dynamically for Issue Worklist table/rows
-            table_row = page.locator('tbody.sapMListItems tr.sapMListTblRow, tr.sapMListTblRow').first
-            table_row.wait_for(state="attached", timeout=12000)
-            page.wait_for_timeout(500)
-            
-            # Extract all issues
-            rows = page.locator('tbody.sapMListItems tr.sapMListTblRow, tr.sapMListTblRow').all()
-            print(f"[INFO] Found {len(rows)} issue rows in Issue Worklist", file=sys.stderr)
-            for r in rows:
-                cells = r.locator('td.sapMListTblCell').all()
-                if len(cells) >= 6:
-                    cat = cells[0].text_content().strip()
-                    obj = cells[1].text_content().strip().replace('\n', ' ')
-                    months = cells[2].text_content().strip()
-                    demands = cells[3].text_content().strip()
-                    score = cells[4].text_content().strip()
-                    overload = cells[5].text_content().strip()
-                    cause = cells[6].text_content().strip() if len(cells) > 6 else ""
-                    
-                    issues_list.append({
-                        "Category": cat,
-                        "Object": obj,
-                        "Affected Months": months,
-                        "Affected Demands": demands,
-                        "Impact Score": score,
-                        "Overload %": overload,
-                        "Cause": cause
-                    })
-            
-            # Switch back to Demand Plan Simulation (or Simulation)
-            if switcher:
-                switcher.click(force=True)
-                page.wait_for_timeout(300)
-                
-                if is_select:
-                    sim_item = page.locator('.sapMSelectListItemText:has-text("Demand Plan Simulation"), .sapMSelectListItemText:has-text("Simulation"), .sapMSelectListItem:has-text("Demand Plan Simulation"), li:has-text("Demand Plan Simulation")').first
-                else:
-                    sim_item = page.locator('.sapMMenuItem:has-text("Demand Plan Simulation"), .sapMMenuItemText:has-text("Demand Plan Simulation"), .sapMMenuItem:has-text("Simulation")').first
-                    
-                try:
-                    sim_item.wait_for(state="visible", timeout=4000)
-                except Exception:
-                    sim_item = page.locator('.sapMMenuItem:has-text("Demand Plan Simulation"), .sapMMenuItemText:has-text("Demand Plan Simulation"), .sapMSelectListItemText:has-text("Demand Plan Simulation"), .sapMSelectListItem:has-text("Demand Plan Simulation"), li:has-text("Demand Plan Simulation"), .sapMMenuItem:has-text("Simulation")').first
-                    sim_item.wait_for(state="visible", timeout=6000)
-                    
-                sim_item.click(force=True)
-            
-            # Wait for main simulation table
-            page.locator('[id*="simulationTableId"]').first.wait_for(state="attached", timeout=12000)
-            page.wait_for_timeout(500)
+                issues_list.append({
+                    "Category": cat,
+                    "Object": obj,
+                    "Affected Months": months,
+                    "Affected Demands": demands,
+                    "Impact Score": score,
+                    "Overload %": overload,
+                    "Cause": cause
+                })
+        
+        # Switch back to Demand Plan Simulation (or Simulation)
+        switch_simulation_view(page, ["Demand Plan Simulation", "Simulation"])
+        
+        # Wait for main simulation table
+        page.locator('[id*="simulationTableId"]').first.wait_for(state="attached", timeout=12000)
+        page.wait_for_timeout(500)
     except Exception as e:
         print(f"[WARNING] Failed to extract detailed issues: {e}", file=sys.stderr)
     return issues_list
@@ -1832,19 +1895,7 @@ def run_capacity_adaptation(page):
 
     # ── STEP 2: Switch to "Capacity Plan Simulation" view ────────────────────
     t0 = time.time()
-    print("[TIMED] Opening view switcher...", file=sys.stderr)
-    header_btn = page.locator('[id="simulationViewMenuButtonId-internalBtn"]')
-    header_btn.wait_for(state="visible", timeout=8000)
-    header_btn.click(force=True)
-    page.wait_for_timeout(300)
-
-    menu_item = page.locator(
-        '.sapMMenuItem:has-text("Capacity Plan Simulation"), '
-        '.sapMMenuItemText:has-text("Capacity Plan Simulation"), '
-        'li:has-text("Capacity Plan Simulation")'
-    ).first
-    menu_item.wait_for(state="visible", timeout=8000)
-    menu_item.click(force=True)
+    switch_simulation_view(page, ["Capacity Plan Simulation"])
     print(f"[TIMED] Switched to Capacity Plan Simulation in {time.time() - t0:.3f}s", file=sys.stderr)
 
     # ── STEP 3: Wait for the Capacity Plan table to load ─────────────────────
