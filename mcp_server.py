@@ -854,6 +854,7 @@ def run_complete_pmrp_pipeline(
                     # Navigate to jobs page to bootstrap OData correctly
                     job_init_url = sap_url.rstrip('/') + "/ui#PMRPSimulation-simulate"
                     page.goto(job_init_url, wait_until="domcontentloaded", timeout=0)
+                    page.reload(wait_until="domcontentloaded", timeout=0)
                     page.wait_for_timeout(3000)
                     
                     # 2. Schedule simulation
@@ -949,6 +950,7 @@ def run_complete_pmrp_pipeline(
                 print("[INFO] Unified E2E: Navigating to jobs workspace to bootstrap OData...", file=sys.stderr)
                 job_init_url = sap_url.rstrip('/') + "/ui#PMRPSimulation-simulate"
                 page.goto(job_init_url, wait_until="domcontentloaded", timeout=0)
+                page.reload(wait_until="domcontentloaded", timeout=0)
                 page.wait_for_timeout(3000)
                 
                 # 2. Schedule simulation
