@@ -2071,7 +2071,7 @@ def run_capacity_adaptation(page):
     t0 = time.time()
     print("[TIMED] Reloading main dashboard...", file=sys.stderr)
     page.goto(sim_url, wait_until="domcontentloaded", timeout=0)
-    wait_for_simulation_ready(page, sim_url)
+    wait_for_simulation_ready(page, sim_url, fast_kpi_only=True)
     print(f"[TIMED] Dashboard reloaded & recalculated in {time.time()-t0:.3f}s", file=sys.stderr)
 
     print(f"=================== DONE in {time.time()-start:.3f}s ===================\n", file=sys.stderr)
@@ -2094,7 +2094,7 @@ def run_release_simulation(
     selected_non_mrp_version_active: Optional[bool] = None,
     capacity_change_proposals: Optional[bool] = None
 ):
-    list_url = sap_url.rstrip('/') + "/ui#PMRPSimulation-process"
+    list_url = sap_url.rstrip('/') + "/ui#PMRPSimulation-simulate"
     print(f"[INFO] Navigating to simulations list URL: {list_url}", file=sys.stderr)
     page.goto(list_url, wait_until="domcontentloaded", timeout=0)
     
@@ -2205,7 +2205,7 @@ def main():
     load_dotenv()
     sap_url = os.getenv("SAP_URL")
     state_path = "sap_session_state.json"
-    sim_url = sap_url.rstrip('/') + "/ui#PMRPSimulation-process&/PmrpSimulation('SIM_PIR')"
+    sim_url = sap_url.rstrip('/') + "/ui#PMRPSimulation-simulate&/PmrpSimulation('SIM_PIR')"
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)

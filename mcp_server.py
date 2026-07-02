@@ -391,7 +391,7 @@ def check_pmrp_simulation_kpis(
                 details_local = f"Batch of {len(batch_simulations)} simulation KPIs"
                 reports = []
                 for s_id in batch_simulations:
-                    sim_url = sap_url.rstrip('/') + f"/ui#PMRPSimulation-process&/PmrpSimulation('{s_id}')"
+                    sim_url = sap_url.rstrip('/') + f"/ui#PMRPSimulation-simulate&/PmrpSimulation('{s_id}')"
                     page.goto(sim_url, wait_until="domcontentloaded", timeout=0)
                     wait_for_simulation_ready(page, sim_url, fast_kpi_only=True)
                     kpis = get_simulation_kpis(page, wait_for_load=False)
@@ -479,7 +479,7 @@ def remediate_pmrp_simulation(
                 for s_id in batch_simulations:
                     sim_url = sap_url.rstrip('/') + f"/ui#PMRPSimulation-simulate&/PmrpSimulation('{s_id}')"
                     page.goto(sim_url, wait_until="domcontentloaded", timeout=0)
-                    wait_for_simulation_ready(page, sim_url)
+                    wait_for_simulation_ready(page, sim_url, fast_kpi_only=True)
                     
                     kpis_start = get_simulation_kpis(page, wait_for_load=False, extract_details=False)
                     try:
@@ -490,7 +490,7 @@ def remediate_pmrp_simulation(
                     if issues_val > 0:
                         print(f"[INFO] Capacity issues detected: {issues_val}. Running Capacity Adaptation for {s_id}...", file=sys.stderr)
                         run_capacity_adaptation(page)
-                        wait_for_simulation_ready(page, sim_url)
+                        wait_for_simulation_ready(page, sim_url, fast_kpi_only=True)
                     
                     kpis_final = get_simulation_kpis(page, wait_for_load=False, extract_details=False)
                     results.append(f"Simulation {s_id} remediated. Final KPIs: {kpis_final}")
@@ -500,7 +500,7 @@ def remediate_pmrp_simulation(
                 details_local = f"Sim ID: {sim_id}"
                 sim_url = sap_url.rstrip('/') + f"/ui#PMRPSimulation-simulate&/PmrpSimulation('{sim_id}')"
                 page.goto(sim_url, wait_until="domcontentloaded", timeout=0)
-                wait_for_simulation_ready(page, sim_url)
+                wait_for_simulation_ready(page, sim_url, fast_kpi_only=True)
                 
                 kpis_start = get_simulation_kpis(page, wait_for_load=False, extract_details=False)
                 print(f"[INFO] Initial KPIs: {kpis_start}", file=sys.stderr)
@@ -513,12 +513,12 @@ def remediate_pmrp_simulation(
                 if issues_val > 0:
                     print(f"[INFO] Capacity issues detected: {issues_val}. Running Capacity Adaptation...", file=sys.stderr)
                     run_capacity_adaptation(page)
-                    wait_for_simulation_ready(page, sim_url)
+                    wait_for_simulation_ready(page, sim_url, fast_kpi_only=True)
                 else:
                     print("[INFO] No capacity issues detected. Skipping remediation.", file=sys.stderr)
                     
                 kpis_final = get_simulation_kpis(page, wait_for_load=False, extract_details=False)
-                res_str = f"SUCCESS: Completed capacity remediation for simulation {sim_id}. Final KPIs: {kpis_final}"
+                res_str = f"SUCCESS: Completed capacity remediation for simulation {sim_id}. Initial KPIs: {kpis_start}. Final KPIs: {kpis_final}"
                 return res_str
                 
         res_str = run_on_worker(run_logic)
@@ -871,7 +871,7 @@ def run_complete_pmrp_pipeline(
                     # 3. Wait for calculation to finish
                     sim_url = sap_url.rstrip('/') + f"/ui#PMRPSimulation-simulate&/PmrpSimulation('{s_id}')"
                     page.goto(sim_url, wait_until="domcontentloaded", timeout=0)
-                    wait_for_simulation_ready(page, sim_url)
+                    wait_for_simulation_ready(page, sim_url, fast_kpi_only=True)
                     
                     # 4. Extract and remediate KPIs
                     kpis_start = get_simulation_kpis(page, wait_for_load=False, extract_details=False)
@@ -882,7 +882,7 @@ def run_complete_pmrp_pipeline(
                         
                     if issues_val > 0:
                         run_capacity_adaptation(page)
-                        wait_for_simulation_ready(page, sim_url)
+                        wait_for_simulation_ready(page, sim_url, fast_kpi_only=True)
                         kpis_after = get_simulation_kpis(page, wait_for_load=False, extract_details=False)
                         try:
                             issues_val = int(re.sub(r'\D', '', kpis_after.get("Capacity Issues", "0")))
@@ -965,9 +965,9 @@ def run_complete_pmrp_pipeline(
                 
                 # 3. Wait for calculation to finish
                 print("[INFO] Unified E2E: Waiting for simulation ready...", file=sys.stderr)
-                sim_url = sap_url.rstrip('/') + f"/ui#PMRPSimulation-process&/PmrpSimulation('{simulation_id}')"
+                sim_url = sap_url.rstrip('/') + f"/ui#PMRPSimulation-simulate&/PmrpSimulation('{simulation_id}')"
                 page.goto(sim_url, wait_until="domcontentloaded", timeout=0)
-                wait_for_simulation_ready(page, sim_url)
+                wait_for_simulation_ready(page, sim_url, fast_kpi_only=True)
                 
                 # 4. Extract and remediate KPIs
                 print("[INFO] Unified E2E: Checking KPIs...", file=sys.stderr)
@@ -982,7 +982,7 @@ def run_complete_pmrp_pipeline(
                 if issues_val > 0:
                     print("[INFO] Unified E2E: Running Capacity Adaptation...", file=sys.stderr)
                     run_capacity_adaptation(page)
-                    wait_for_simulation_ready(page, sim_url)
+                    wait_for_simulation_ready(page, sim_url, fast_kpi_only=True)
                     
                     kpis_after = get_simulation_kpis(page, wait_for_load=False, extract_details=False)
                     print(f"[INFO] KPIs after adaptation: {kpis_after}", file=sys.stderr)
