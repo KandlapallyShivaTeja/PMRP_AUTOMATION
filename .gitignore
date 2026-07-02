@@ -17,3 +17,6 @@ original_*.py
 commit_*.py
 capture_*.py
 check_*.py
+dump_*.py
+scratch/
+find_*.py
